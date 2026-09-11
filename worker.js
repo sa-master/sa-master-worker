@@ -1,12 +1,13 @@
 export default {
   async fetch(request, env) {
+
     const cors = {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
     };
 
-    // CORS preflight
+    // CORS
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -14,12 +15,37 @@ export default {
       });
     }
 
-    // Only POST requests
+    // --------------------------------------------------
+    // DIAGNOSTIC GET
+    // --------------------------------------------------
+    // Відкриття Worker у браузері покаже,
+    // чи доступні Secrets. Значення секретів не показуються.
+    if (request.method === "GET") {
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          BOT_TOKEN: !!env.BOT_TOKEN,
+          CHAT_ID: !!env.CHAT_ID,
+          bindings: Object.keys(env),
+        }),
+        {
+          status: 200,
+          headers: {
+            ...cors,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+    }
+
+    // --------------------------------------------------
+    // ONLY POST
+    // --------------------------------------------------
     if (request.method !== "POST") {
       return new Response(
         JSON.stringify({
           ok: false,
-          error: "Method not allowed. Use POST.",
+          error: "Method not allowed",
         }),
         {
           status: 405,
@@ -32,7 +58,10 @@ export default {
     }
 
     try {
-      // Check Cloudflare Secrets
+
+      // ------------------------------------------------
+      // CHECK SECRETS
+      // ------------------------------------------------
       if (!env.BOT_TOKEN) {
         throw new Error("BOT_TOKEN binding is NOT available");
       }
@@ -41,7 +70,9 @@ export default {
         throw new Error("CHAT_ID binding is NOT available");
       }
 
-      // Read request body
+      // ------------------------------------------------
+      // READ REQUEST
+      // ------------------------------------------------
       let data;
 
       try {
@@ -56,7 +87,9 @@ export default {
         source,
       } = data;
 
-      // Validate form data
+      // ------------------------------------------------
+      // VALIDATE FORM
+      // ------------------------------------------------
       if (!name || !phone) {
         return new Response(
           JSON.stringify({
@@ -73,7 +106,9 @@ export default {
         );
       }
 
-      // Prepare Telegram message
+      // ------------------------------------------------
+      // TELEGRAM MESSAGE
+      // ------------------------------------------------
       const text = `🏠 НОВА ЗАЯВКА
 
 👤 Ім'я: ${name}
@@ -81,33 +116,39 @@ export default {
 🔗 Джерело: ${source || "сайт"}
 🕐 Час: ${new Date().toLocaleString("uk-UA")}`;
 
-      // Telegram API
-      const telegramResponse = await fetch(
-        `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            chat_id: env.CHAT_ID,
-            text: text,
-          }),
-        }
-      );
+      // ------------------------------------------------
+      // TELEGRAM API
+      // ------------------------------------------------
+      const telegramUrl =
+        `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
 
-      // Read Telegram response
+      const telegramResponse = await fetch(telegramUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          chat_id: env.CHAT_ID,
+          text: text,
+        }),
+      });
+
+      // ------------------------------------------------
+      // TELEGRAM RESPONSE
+      // ------------------------------------------------
       let telegramData;
 
       try {
         telegramData = await telegramResponse.json();
       } catch {
         throw new Error(
-          `Telegram returned invalid response (${telegramResponse.status})`
+          `Telegram returned invalid response: ${telegramResponse.status}`
         );
       }
 
-      // Telegram API error
+      // ------------------------------------------------
+      // TELEGRAM ERROR
+      // ------------------------------------------------
       if (!telegramResponse.ok || !telegramData.ok) {
         return new Response(
           JSON.stringify({
@@ -125,10 +166,13 @@ export default {
         );
       }
 
-      // Success
+      // ------------------------------------------------
+      // SUCCESS
+      // ------------------------------------------------
       return new Response(
         JSON.stringify({
           ok: true,
+          message: "Заявку успішно відправлено в Telegram",
         }),
         {
           status: 200,
@@ -139,11 +183,15 @@ export default {
         }
       );
 
-    } catch (err) {
+    } catch (error) {
+
+      // ------------------------------------------------
+      // WORKER ERROR
+      // ------------------------------------------------
       return new Response(
         JSON.stringify({
           ok: false,
-          error: err?.message || "Unknown Worker error",
+          error: error?.message || "Unknown Worker error",
         }),
         {
           status: 500,
