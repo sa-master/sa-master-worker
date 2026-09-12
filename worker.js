@@ -12,6 +12,7 @@ const STATUS_LABELS = {
 
 export default {
   async fetch(request, env) {
+
     const cors = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, PATCH, OPTIONS",
@@ -33,6 +34,7 @@ export default {
       // =========================================================
 
       if (request.method === "GET" && path === "/") {
+
         return json({
           ok: true,
 
@@ -76,7 +78,8 @@ export default {
           testText,
           {
             httpMetadata: {
-              contentType: "text/plain; charset=utf-8"
+              contentType:
+                "text/plain; charset=utf-8"
             }
           }
         );
@@ -87,7 +90,8 @@ export default {
         if (!storedObject) {
           return json({
             ok: false,
-            error: "Файл записаний, але прочитати його не вдалося",
+            error:
+              "Файл записаний, але прочитати його не вдалося",
             key: testKey
           }, cors, 500);
         }
@@ -103,7 +107,8 @@ export default {
           written: testText,
           read: readText,
           size: storedObject.size,
-          uploaded: storedObject.uploaded || null
+          uploaded:
+            storedObject.uploaded || null
         }, cors);
       }
 
@@ -515,7 +520,8 @@ export default {
           ok: true,
 
           request: {
-            id: currentRequest.id,
+            id:
+              currentRequest.id,
 
             request_code:
               currentRequest.request_code,
@@ -695,6 +701,300 @@ export default {
               STATUS_LABELS[requestData.object_status] ||
               requestData.object_status ||
               null
+          }
+        }, cors);
+      }
+
+
+      // =========================================================
+      // POST /object/:objectCode/file
+      // Завантаження файлу в R2 + запис у D1
+      // =========================================================
+
+      if (
+        request.method === "POST" &&
+        path.startsWith("/object/") &&
+        path.endsWith("/file")
+      ) {
+
+        if (!env.FILES) {
+          return json({
+            ok: false,
+            error:
+              "R2 binding FILES не підключений"
+          }, cors, 500);
+        }
+
+
+        // -------------------------------------------------------
+        // Код об'єкта
+        // -------------------------------------------------------
+
+        const objectCode =
+          decodeURIComponent(
+            path
+              .replace("/object/", "")
+              .replace("/file", "")
+              .replace(/\/+$/, "")
+          );
+
+
+        // -------------------------------------------------------
+        // Знаходимо об'єкт
+        // -------------------------------------------------------
+
+        const objectResult =
+          await env.DB.prepare(`
+            SELECT
+              id,
+              object_code,
+              name
+            FROM objects
+            WHERE object_code = ?
+            LIMIT 1
+          `).bind(objectCode).all();
+
+        if (
+          !objectResult.results ||
+          !objectResult.results.length
+        ) {
+          return json({
+            ok: false,
+            error: "Об'єкт не знайдено"
+          }, cors, 404);
+        }
+
+        const object =
+          objectResult.results[0];
+
+
+        // -------------------------------------------------------
+        // Отримуємо multipart/form-data
+        // -------------------------------------------------------
+
+        let formData;
+
+        try {
+          formData =
+            await request.formData();
+        } catch {
+          return json({
+            ok: false,
+            error:
+              "Очікується multipart/form-data"
+          }, cors, 400);
+        }
+
+        const file =
+          formData.get("file");
+
+        if (
+          !file ||
+          typeof file === "string" ||
+          typeof file.arrayBuffer !== "function"
+        ) {
+          return json({
+            ok: false,
+            error:
+              "Файл не переданий. Використай поле file."
+          }, cors, 400);
+        }
+
+
+        // -------------------------------------------------------
+        // Додаткові параметри
+        // -------------------------------------------------------
+
+        const folderValue =
+          String(
+            formData.get("folder") ||
+            "documents"
+          ).trim();
+
+        const uploadedBy =
+          String(
+            formData.get("uploaded_by") ||
+            "system"
+          ).trim();
+
+
+        // -------------------------------------------------------
+        // Безпечна назва файлу
+        // -------------------------------------------------------
+
+        const originalName =
+          String(
+            file.name ||
+            "file"
+          ).trim();
+
+        const safeName =
+          originalName
+            .replace(/[^\p{L}\p{N}._-]+/gu, "_")
+            .replace(/^_+|_+$/g, "")
+            .slice(0, 180) ||
+          "file";
+
+
+        // -------------------------------------------------------
+        // Унікальний ключ R2
+        // -------------------------------------------------------
+
+        const timestamp =
+          Date.now();
+
+        const storageKey =
+          `objects/${object.object_code}/${folderValue}/${timestamp}-${safeName}`;
+
+
+        // -------------------------------------------------------
+        // Запис файлу в R2
+        // -------------------------------------------------------
+
+        const arrayBuffer =
+          await file.arrayBuffer();
+
+        await env.FILES.put(
+          storageKey,
+          arrayBuffer,
+          {
+            httpMetadata: {
+              contentType:
+                file.type ||
+                "application/octet-stream"
+            }
+          }
+        );
+
+
+        // -------------------------------------------------------
+        // Версія файлу
+        // -------------------------------------------------------
+
+        const versionResult =
+          await env.DB.prepare(`
+            SELECT
+              COALESCE(MAX(version), 0) + 1 AS next_version
+            FROM files
+            WHERE object_id = ?
+              AND name = ?
+          `).bind(
+            object.id,
+            originalName
+          ).all();
+
+        const version =
+          Number(
+            versionResult.results?.[0]?.next_version ||
+            1
+          );
+
+
+        // -------------------------------------------------------
+        // Запис метаданих у D1
+        // -------------------------------------------------------
+
+        const insertResult =
+          await env.DB.prepare(`
+            INSERT INTO files (
+              object_id,
+              name,
+              file_type,
+              storage_key,
+              version,
+              uploaded_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+          `).bind(
+            object.id,
+            originalName,
+            file.type ||
+              "application/octet-stream",
+            storageKey,
+            version,
+            uploadedBy
+          ).run();
+
+        if (!insertResult.meta?.last_row_id) {
+
+          // Якщо D1 не записав метадані,
+          // прибираємо файл з R2, щоб не залишати сирітський файл.
+
+          try {
+            await env.FILES.delete(
+              storageKey
+            );
+          } catch (cleanupError) {
+            console.error(
+              "R2 cleanup error:",
+              cleanupError
+            );
+          }
+
+          return json({
+            ok: false,
+            error:
+              "Файл записаний у R2, але метадані не вдалося записати в D1"
+          }, cors, 500);
+        }
+
+
+        // -------------------------------------------------------
+        // Подія в історії об'єкта
+        // -------------------------------------------------------
+
+        await env.DB.prepare(`
+          INSERT INTO events (
+            object_id,
+            request_id,
+            event_type,
+            content,
+            author_type
+          )
+          VALUES (?, ?, ?, ?, ?)
+        `).bind(
+          object.id,
+          null,
+          "file_uploaded",
+          `Додано файл: ${originalName}`,
+          "system"
+        ).run();
+
+
+        // -------------------------------------------------------
+        // Результат
+        // -------------------------------------------------------
+
+        return json({
+          ok: true,
+
+          file: {
+            id:
+              insertResult.meta.last_row_id,
+
+            object_id:
+              object.id,
+
+            object_code:
+              object.object_code,
+
+            name:
+              originalName,
+
+            file_type:
+              file.type ||
+              "application/octet-stream",
+
+            storage_key:
+              storageKey,
+
+            version,
+
+            uploaded_by:
+              uploadedBy,
+
+            size:
+              file.size || arrayBuffer.byteLength
           }
         }, cors);
       }
