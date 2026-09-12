@@ -15,8 +15,23 @@ export default {
 
     try {
       // =========================================================
+      // STATUS CONFIG
+      // =========================================================
+
+      const STATUS_LABELS = {
+        new: "Нова",
+        processing: "Опрацювання",
+        estimate: "Прорахунок",
+        approved: "Погоджено",
+        scheduled: "Заплановано",
+        installation: "Монтаж",
+        completed: "Завершено",
+        service: "Сервіс",
+        cancelled: "Відмова / Неактуально",
+      };
+
+      // =========================================================
       // GET /
-      // Diagnostics
       // =========================================================
 
       if (request.method === "GET" && path === "/") {
@@ -26,12 +41,12 @@ export default {
           CHAT_ID: !!env.CHAT_ID,
           DB: !!env.DB,
           bindings: Object.keys(env),
+          statuses: STATUS_LABELS,
         });
       }
 
       // =========================================================
       // GET /requests
-      // List all requests
       // =========================================================
 
       if (request.method === "GET" && path === "/requests") {
@@ -67,15 +82,23 @@ export default {
           ORDER BY id DESC
         `).all();
 
+        const requests = (result.results || []).map((item) => ({
+          ...item,
+          status_label:
+            STATUS_LABELS[item.status] ||
+            item.status ||
+            "Невідомо",
+        }));
+
         return json({
           ok: true,
-          requests: result.results || [],
+          requests,
         });
       }
 
       // =========================================================
       // POST /request/:requestCode/client
-      // Find or create client manually
+      // Manual find/create client
       // =========================================================
 
       if (
@@ -141,7 +164,7 @@ export default {
 
         const req = requestResult.results[0];
 
-        // Якщо клієнт уже прив'язаний
+        // Already linked
         if (req.client_id) {
           const existingClient = await env.DB.prepare(`
             SELECT
@@ -165,7 +188,13 @@ export default {
               ok: true,
               created: false,
               existing: true,
-              request: req,
+              request: {
+                ...req,
+                status_label:
+                  STATUS_LABELS[req.status] ||
+                  req.status ||
+                  "Невідомо",
+              },
               client: existingClient.results[0],
             });
           }
@@ -183,7 +212,6 @@ export default {
           );
         }
 
-        // Шукаємо клієнта за телефоном
         const clientResult = await env.DB.prepare(`
           SELECT
             id,
@@ -242,7 +270,7 @@ export default {
           created = true;
         }
 
-        await env.DB.prepare(`
+        const attachResult = await env.DB.prepare(`
           UPDATE requests
           SET
             client_id = ?,
@@ -251,6 +279,22 @@ export default {
         `)
           .bind(client.id, req.id)
           .run();
+
+        if (
+          !attachResult.meta ||
+          attachResult.meta.changes !== 1
+        ) {
+          return json(
+            {
+              ok: false,
+              error:
+                "Client found/created but could not be attached",
+              requestCode,
+              clientId: client.id,
+            },
+            500
+          );
+        }
 
         const updatedRequestResult = await env.DB.prepare(`
           SELECT
@@ -287,7 +331,13 @@ export default {
           ok: true,
           created,
           existing,
-          request: updatedRequest,
+          request: {
+            ...updatedRequest,
+            status_label:
+              STATUS_LABELS[updatedRequest.status] ||
+              updatedRequest.status ||
+              "Невідомо",
+          },
           client,
         });
       }
@@ -354,9 +404,17 @@ export default {
           );
         }
 
+        const requestData = result.results[0];
+
         return json({
           ok: true,
-          request: result.results[0],
+          request: {
+            ...requestData,
+            status_label:
+              STATUS_LABELS[requestData.status] ||
+              requestData.status ||
+              "Невідомо",
+          },
         });
       }
 
@@ -384,7 +442,6 @@ export default {
           );
         }
 
-        // Object
         const objectResult = await env.DB.prepare(`
           SELECT
             id,
@@ -419,7 +476,6 @@ export default {
 
         const object = objectResult.results[0];
 
-        // Client
         const clientResult = await env.DB.prepare(`
           SELECT
             id,
@@ -434,7 +490,6 @@ export default {
           .bind(object.client_id)
           .all();
 
-        // Estimates
         const estimatesResult = await env.DB.prepare(`
           SELECT
             id,
@@ -452,7 +507,6 @@ export default {
 
         const estimates = estimatesResult.results || [];
 
-        // Estimate items
         let estimateItems = [];
 
         if (estimates.length) {
@@ -483,7 +537,6 @@ export default {
           estimateItems = itemsResult.results || [];
         }
 
-        // Payments
         const paymentsResult = await env.DB.prepare(`
           SELECT
             id,
@@ -501,7 +554,6 @@ export default {
 
         const payments = paymentsResult.results || [];
 
-        // Financial
         let totalEstimate = 0;
 
         for (const item of estimateItems) {
@@ -517,7 +569,6 @@ export default {
         const balance =
           totalEstimate - totalPayments;
 
-        // Events
         const eventsResult = await env.DB.prepare(`
           SELECT
             id,
@@ -534,7 +585,6 @@ export default {
           .bind(object.id)
           .all();
 
-        // Important
         const importantResult = await env.DB.prepare(`
           SELECT
             id,
@@ -551,7 +601,6 @@ export default {
           .bind(object.id)
           .all();
 
-        // Files
         const filesResult = await env.DB.prepare(`
           SELECT
             id,
@@ -572,7 +621,13 @@ export default {
         return json({
           ok: true,
 
-          object,
+          object: {
+            ...object,
+            status_label:
+              STATUS_LABELS[object.status] ||
+              object.status ||
+              "Невідомо",
+          },
 
           client:
             clientResult.results &&
@@ -592,11 +647,14 @@ export default {
             balance,
           },
 
-          events: eventsResult.results || [],
+          events:
+            eventsResult.results || [],
 
-          important: importantResult.results || [],
+          important:
+            importantResult.results || [],
 
-          files: filesResult.results || [],
+          files:
+            filesResult.results || [],
         });
       }
 
@@ -638,10 +696,6 @@ export default {
             500
           );
         }
-
-        // -------------------------------------------------------
-        // Body
-        // -------------------------------------------------------
 
         let body;
 
@@ -688,10 +742,6 @@ export default {
             body.source || "SA-MASTER.PRO"
           ).trim();
 
-        // -------------------------------------------------------
-        // Validation
-        // -------------------------------------------------------
-
         if (!name) {
           return json(
             {
@@ -725,10 +775,6 @@ export default {
           );
         }
 
-        // -------------------------------------------------------
-        // Type labels
-        // -------------------------------------------------------
-
         const labels = {
           complex: "Комплексний монтаж",
           local: "Локальний монтаж",
@@ -743,7 +789,7 @@ export default {
           "Не вказано";
 
         // -------------------------------------------------------
-        // Insert request
+        // Create request
         // -------------------------------------------------------
 
         const insertResult =
@@ -793,7 +839,7 @@ export default {
           insertResult.results[0].id;
 
         // -------------------------------------------------------
-        // Request code
+        // Generate request code
         // -------------------------------------------------------
 
         const year =
@@ -817,9 +863,10 @@ export default {
           )
           .run();
 
-        // =======================================================
-        // FIND / CREATE CLIENT AUTOMATICALLY
-        // =======================================================
+        // -------------------------------------------------------
+        // Find existing client
+        // or create new client
+        // -------------------------------------------------------
 
         const clientResult =
           await env.DB.prepare(`
@@ -843,10 +890,8 @@ export default {
           clientResult.results &&
           clientResult.results.length
         ) {
-          // Existing client
           client = clientResult.results[0];
         } else {
-          // New client
           const insertClient =
             await env.DB.prepare(`
               INSERT INTO clients (
@@ -959,7 +1004,7 @@ export default {
             : null;
 
         // -------------------------------------------------------
-        // Telegram
+        // Telegram notification
         // -------------------------------------------------------
 
         const now =
@@ -986,25 +1031,19 @@ export default {
 📅 Консультація: ${consultationDate || "—"}
 
 🔗 Джерело: ${source || "SA-MASTER.PRO"}
-📊 Статус: new
+📊 Статус: ${STATUS_LABELS.new}
 🕐 Час: ${now}
 `.trim();
-
-        // -------------------------------------------------------
-        // Telegram API
-        // -------------------------------------------------------
 
         const telegramResponse =
           await fetch(
             `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`,
             {
               method: "POST",
-
               headers: {
                 "Content-Type":
                   "application/json",
               },
-
               body: JSON.stringify({
                 chat_id: env.CHAT_ID,
                 text: telegramText,
@@ -1035,18 +1074,23 @@ export default {
           );
         }
 
-        // -------------------------------------------------------
-        // Success
-        // -------------------------------------------------------
-
         return json({
           ok: true,
 
           requestId:
             requestCode,
 
-          request:
-            savedRequest,
+          request: savedRequest
+            ? {
+                ...savedRequest,
+                status_label:
+                  STATUS_LABELS[
+                    savedRequest.status
+                  ] ||
+                  savedRequest.status ||
+                  "Невідомо",
+              }
+            : null,
 
           client: {
             id: client.id,
@@ -1082,7 +1126,7 @@ export default {
     }
 
     // =========================================================
-    // JSON helper
+    // HELPERS
     // =========================================================
 
     function json(data, status = 200) {
@@ -1090,7 +1134,6 @@ export default {
         JSON.stringify(data),
         {
           status,
-
           headers: {
             ...cors,
             "Content-Type":
@@ -1099,10 +1142,6 @@ export default {
         }
       );
     }
-
-    // =========================================================
-    // Phone normalization
-    // =========================================================
 
     function normalizePhone(phone) {
       return String(phone || "")
