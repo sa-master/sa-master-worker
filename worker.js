@@ -9,7 +9,6 @@ const STATUS_LABELS = {
   service: "Сервіс",
   cancelled: "Відмова / Неактуально"
 };
-
 export default {
   async fetch(request, env) {
     const cors = {
@@ -17,20 +16,15 @@ export default {
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type"
     };
-
     if (request.method === "OPTIONS") {
       return new Response(null, { headers: cors });
     }
-
     const url = new URL(request.url);
     const path = url.pathname;
-
     try {
-
       // =========================================================
       // GET /
       // =========================================================
-
       if (request.method === "GET" && path === "/") {
         return json({
           ok: true,
@@ -41,12 +35,9 @@ export default {
           statuses: STATUS_LABELS
         }, cors);
       }
-
-
       // =========================================================
       // GET /requests
       // =========================================================
-
       if (request.method === "GET" && path === "/requests") {
         const result = await env.DB.prepare(`
           SELECT
@@ -58,23 +49,21 @@ export default {
           LEFT JOIN clients c ON c.id = r.client_id
           ORDER BY r.id DESC
         `).all();
-
         const requests = (result.results || []).map(r => ({
           ...r,
-          status_label: STATUS_LABELS[r.status] || r.status || "Невідомо"
+          status_label:
+            STATUS_LABELS[r.status] ||
+            r.status ||
+            "Невідомо"
         }));
-
         return json({
           ok: true,
           requests
         }, cors);
       }
-
-
       // =========================================================
       // POST /request/:requestCode/client
       // =========================================================
-
       if (
         request.method === "POST" &&
         path.startsWith("/request/") &&
@@ -86,23 +75,22 @@ export default {
             .replace("/client", "")
             .replace(/\/+$/, "")
         );
-
         const requestResult = await env.DB.prepare(`
           SELECT *
           FROM requests
           WHERE request_code = ?
           LIMIT 1
         `).bind(requestCode).all();
-
-        if (!requestResult.results || !requestResult.results.length) {
+        if (
+          !requestResult.results ||
+          !requestResult.results.length
+        ) {
           return json({
             ok: false,
             error: "Заявку не знайдено"
           }, cors, 404);
         }
-
         const req = requestResult.results[0];
-
         if (req.client_id) {
           const clientResult = await env.DB.prepare(`
             SELECT *
@@ -110,7 +98,6 @@ export default {
             WHERE id = ?
             LIMIT 1
           `).bind(req.client_id).all();
-
           return json({
             ok: true,
             created: false,
@@ -119,21 +106,20 @@ export default {
             client: clientResult.results?.[0] || null
           }, cors);
         }
-
         const normalizedPhone = normalizePhone(req.phone);
-
         let clientResult = await env.DB.prepare(`
           SELECT *
           FROM clients
           WHERE phone = ?
           LIMIT 1
         `).bind(normalizedPhone).all();
-
         let client;
         let created = false;
         let existing = false;
-
-        if (clientResult.results && clientResult.results.length) {
+        if (
+          clientResult.results &&
+          clientResult.results.length
+        ) {
           client = clientResult.results[0];
           existing = true;
         } else {
@@ -147,27 +133,24 @@ export default {
             req.name,
             normalizedPhone
           ).run();
-
           if (!insertClient.meta?.last_row_id) {
             return json({
               ok: false,
               error: "Не вдалося створити клієнта"
             }, cors, 500);
           }
-
-          const newClientId = insertClient.meta.last_row_id;
-
+          const newClientId =
+            insertClient.meta.last_row_id;
           const newClientResult = await env.DB.prepare(`
             SELECT *
             FROM clients
             WHERE id = ?
             LIMIT 1
           `).bind(newClientId).all();
-
-          client = newClientResult.results?.[0] || null;
+          client =
+            newClientResult.results?.[0] || null;
           created = true;
         }
-
         await env.DB.prepare(`
           UPDATE requests
           SET client_id = ?,
@@ -177,7 +160,6 @@ export default {
           client.id,
           req.id
         ).run();
-
         return json({
           ok: true,
           created,
@@ -189,13 +171,10 @@ export default {
           client
         }, cors);
       }
-
-
       // =========================================================
       // POST /request/:requestCode/status
       // Зміна статусу + запис події в events
       // =========================================================
-
       if (
         request.method === "POST" &&
         path.startsWith("/request/") &&
@@ -207,9 +186,7 @@ export default {
             .replace("/status", "")
             .replace(/\/+$/, "")
         );
-
         let body;
-
         try {
           body = await request.json();
         } catch {
@@ -218,9 +195,8 @@ export default {
             error: "Некоректний JSON"
           }, cors, 400);
         }
-
-        const newStatus = String(body.status || "").trim();
-
+        const newStatus =
+          String(body.status || "").trim();
         if (!STATUS_LABELS[newStatus]) {
           return json({
             ok: false,
@@ -228,25 +204,25 @@ export default {
             allowed_statuses: STATUS_LABELS
           }, cors, 400);
         }
-
         const requestResult = await env.DB.prepare(`
           SELECT id, request_code, status
           FROM requests
           WHERE request_code = ?
           LIMIT 1
         `).bind(requestCode).all();
-
-        if (!requestResult.results || !requestResult.results.length) {
+        if (
+          !requestResult.results ||
+          !requestResult.results.length
+        ) {
           return json({
             ok: false,
             error: "Заявку не знайдено"
           }, cors, 404);
         }
-
-        const currentRequest = requestResult.results[0];
-        const oldStatus = currentRequest.status;
-
-        // Оновлюємо статус заявки
+        const currentRequest =
+          requestResult.results[0];
+        const oldStatus =
+          currentRequest.status;
         const updateResult = await env.DB.prepare(`
           UPDATE requests
           SET status = ?,
@@ -256,27 +232,23 @@ export default {
           newStatus,
           currentRequest.id
         ).run();
-
-        if (updateResult.meta && updateResult.meta.changes !== 1) {
+        if (
+          updateResult.meta &&
+          updateResult.meta.changes !== 1
+        ) {
           return json({
             ok: false,
             error: "Статус заявки не було змінено"
           }, cors, 500);
         }
-
-        // ---------------------------------------------------------
-        // Записуємо історію зміни статусу
-        // ---------------------------------------------------------
-
         const oldStatusLabel =
-          STATUS_LABELS[oldStatus] || oldStatus || "Невідомо";
-
+          STATUS_LABELS[oldStatus] ||
+          oldStatus ||
+          "Невідомо";
         const newStatusLabel =
           STATUS_LABELS[newStatus];
-
         const eventContent =
           `${oldStatusLabel} → ${newStatusLabel}`;
-
         const eventResult = await env.DB.prepare(`
           INSERT INTO events (
             object_id,
@@ -293,27 +265,27 @@ export default {
           eventContent,
           "system"
         ).run();
-
-        if (eventResult.meta && eventResult.meta.changes !== 1) {
+        if (
+          eventResult.meta &&
+          eventResult.meta.changes !== 1
+        ) {
           return json({
             ok: false,
-            error: "Статус змінено, але подію не вдалося записати"
+            error:
+              "Статус змінено, але подію не вдалося записати"
           }, cors, 500);
         }
-
         return json({
           ok: true,
           request: {
             id: currentRequest.id,
-            request_code: currentRequest.request_code,
-
+            request_code:
+              currentRequest.request_code,
             old_status: oldStatus,
             old_status_label: oldStatusLabel,
-
             status: newStatus,
             status_label: newStatusLabel
           },
-
           event: {
             event_type: "status_changed",
             content: eventContent,
@@ -321,12 +293,75 @@ export default {
           }
         }, cors);
       }
-
-
+      // =========================================================
+      // GET /request/:requestCode/events
+      // Історія подій заявки
+      // =========================================================
+      if (
+        request.method === "GET" &&
+        path.startsWith("/request/") &&
+        path.endsWith("/events")
+      ) {
+        const requestCode = decodeURIComponent(
+          path
+            .replace("/request/", "")
+            .replace("/events", "")
+            .replace(/\/+$/, "")
+        );
+        const requestResult = await env.DB.prepare(`
+          SELECT
+            id,
+            request_code,
+            status
+          FROM requests
+          WHERE request_code = ?
+          LIMIT 1
+        `).bind(requestCode).all();
+        if (
+          !requestResult.results ||
+          !requestResult.results.length
+        ) {
+          return json({
+            ok: false,
+            error: "Заявку не знайдено"
+          }, cors, 404);
+        }
+        const currentRequest =
+          requestResult.results[0];
+        const eventsResult = await env.DB.prepare(`
+          SELECT
+            id,
+            request_id,
+            object_id,
+            event_type,
+            content,
+            author_type,
+            author_id,
+            created_at
+          FROM events
+          WHERE request_id = ?
+          ORDER BY id ASC
+        `).bind(currentRequest.id).all();
+        const events =
+          eventsResult.results || [];
+        return json({
+          ok: true,
+          request: {
+            id: currentRequest.id,
+            request_code:
+              currentRequest.request_code,
+            status: currentRequest.status,
+            status_label:
+              STATUS_LABELS[currentRequest.status] ||
+              currentRequest.status ||
+              "Невідомо"
+          },
+          events
+        }, cors);
+      }
       // =========================================================
       // GET /request/:requestCode
       // =========================================================
-
       if (
         request.method === "GET" &&
         path.startsWith("/request/")
@@ -336,7 +371,6 @@ export default {
             .replace("/request/", "")
             .replace(/\/+$/, "")
         );
-
         const result = await env.DB.prepare(`
           SELECT
             r.*,
@@ -347,16 +381,17 @@ export default {
           WHERE r.request_code = ?
           LIMIT 1
         `).bind(requestCode).all();
-
-        if (!result.results || !result.results.length) {
+        if (
+          !result.results ||
+          !result.results.length
+        ) {
           return json({
             ok: false,
             error: "Заявку не знайдено"
           }, cors, 404);
         }
-
-        const requestData = result.results[0];
-
+        const requestData =
+          result.results[0];
         return json({
           ok: true,
           request: {
@@ -368,12 +403,9 @@ export default {
           }
         }, cors);
       }
-
-
       // =========================================================
       // GET /object/:objectCode
       // =========================================================
-
       if (
         request.method === "GET" &&
         path.startsWith("/object/")
@@ -383,7 +415,6 @@ export default {
             .replace("/object/", "")
             .replace(/\/+$/, "")
         );
-
         const result = await env.DB.prepare(`
           SELECT
             o.*,
@@ -394,16 +425,17 @@ export default {
           WHERE o.object_code = ?
           LIMIT 1
         `).bind(objectCode).all();
-
-        if (!result.results || !result.results.length) {
+        if (
+          !result.results ||
+          !result.results.length
+        ) {
           return json({
             ok: false,
             error: "Об'єкт не знайдено"
           }, cors, 404);
         }
-
-        const objectData = result.results[0];
-
+        const objectData =
+          result.results[0];
         return json({
           ok: true,
           object: {
@@ -415,19 +447,15 @@ export default {
           }
         }, cors);
       }
-
-
       // =========================================================
       // POST /
       // Створення нової заявки
       // =========================================================
-
       if (
         request.method === "POST" &&
         path === "/"
       ) {
         let body;
-
         try {
           body = await request.json();
         } catch {
@@ -436,47 +464,50 @@ export default {
             error: "Некоректний JSON"
           }, cors, 400);
         }
-
-        const name = String(body.name || "").trim();
-        const phone = String(body.phone || "").trim();
-        const type = String(body.type || "").trim();
-        const typeLabel = String(body.typeLabel || "").trim();
-        const location = String(body.location || "").trim();
-        const timing = String(body.timing || "").trim();
-        const project = String(body.project || "").trim();
+        const name =
+          String(body.name || "").trim();
+        const phone =
+          String(body.phone || "").trim();
+        const type =
+          String(body.type || "").trim();
+        const typeLabel =
+          String(body.typeLabel || "").trim();
+        const location =
+          String(body.location || "").trim();
+        const timing =
+          String(body.timing || "").trim();
+        const project =
+          String(body.project || "").trim();
         const consultationDate =
           String(body.consultationDate || "").trim();
-
         const source =
-          String(body.source || "SA-MASTER.PRO").trim();
-
+          String(
+            body.source || "SA-MASTER.PRO"
+          ).trim();
         if (!name || !phone || !type) {
           return json({
             ok: false,
-            error: "Необхідні ім'я, телефон та тип заявки"
+            error:
+              "Необхідні ім'я, телефон та тип заявки"
           }, cors, 400);
         }
-
         // ---------------------------------------------------------
         // Створюємо код заявки
         // ---------------------------------------------------------
-
         const countResult = await env.DB.prepare(`
           SELECT COUNT(*) AS count
           FROM requests
           WHERE request_code LIKE 'SM-R-2026-%'
         `).all();
-
         const count =
-          Number(countResult.results?.[0]?.count || 0) + 1;
-
+          Number(
+            countResult.results?.[0]?.count || 0
+          ) + 1;
         const requestCode =
           `SM-R-2026-${String(count).padStart(3, "0")}`;
-
         // ---------------------------------------------------------
         // Створюємо заявку
         // ---------------------------------------------------------
-
         const insertResult = await env.DB.prepare(`
           INSERT INTO requests (
             request_code,
@@ -505,33 +536,32 @@ export default {
           source,
           "new"
         ).run();
-
         if (!insertResult.meta?.last_row_id) {
           return json({
             ok: false,
             error: "Не вдалося створити заявку"
           }, cors, 500);
         }
-
-        const requestId = insertResult.meta.last_row_id;
-
+        const requestId =
+          insertResult.meta.last_row_id;
         // ---------------------------------------------------------
         // Автоматично знаходимо / створюємо клієнта
         // ---------------------------------------------------------
-
-        const normalizedPhone = normalizePhone(phone);
-
+        const normalizedPhone =
+          normalizePhone(phone);
         let clientResult = await env.DB.prepare(`
           SELECT *
           FROM clients
           WHERE phone = ?
           LIMIT 1
         `).bind(normalizedPhone).all();
-
         let client;
-
-        if (clientResult.results && clientResult.results.length) {
-          client = clientResult.results[0];
+        if (
+          clientResult.results &&
+          clientResult.results.length
+        ) {
+          client =
+            clientResult.results[0];
         } else {
           const clientInsert = await env.DB.prepare(`
             INSERT INTO clients (
@@ -543,23 +573,24 @@ export default {
             name,
             normalizedPhone
           ).run();
-
           if (clientInsert.meta?.last_row_id) {
-            const createdClient = await env.DB.prepare(`
-              SELECT *
-              FROM clients
-              WHERE id = ?
-              LIMIT 1
-            `).bind(clientInsert.meta.last_row_id).all();
-
-            client = createdClient.results?.[0] || null;
+            const createdClient =
+              await env.DB.prepare(`
+                SELECT *
+                FROM clients
+                WHERE id = ?
+                LIMIT 1
+              `).bind(
+                clientInsert.meta.last_row_id
+              ).all();
+            client =
+              createdClient.results?.[0] ||
+              null;
           }
         }
-
         // ---------------------------------------------------------
         // Прив'язуємо клієнта до заявки
         // ---------------------------------------------------------
-
         if (client) {
           await env.DB.prepare(`
             UPDATE requests
@@ -571,11 +602,9 @@ export default {
             requestId
           ).run();
         }
-
         // ---------------------------------------------------------
         // Перша подія заявки
         // ---------------------------------------------------------
-
         await env.DB.prepare(`
           INSERT INTO events (
             object_id,
@@ -592,11 +621,9 @@ export default {
           "Створено заявку",
           "system"
         ).run();
-
         // ---------------------------------------------------------
         // Дані для Telegram
         // ---------------------------------------------------------
-
         const telegramText = [
           "🏠 НОВА ЗАЯВКА",
           `🆔 ID: ${requestCode}`,
@@ -609,15 +636,16 @@ export default {
           `📅 Консультація: ${consultationDate || "—"}`,
           `🔗 Джерело: ${source}`,
           `📊 Статус: ${STATUS_LABELS.new}`,
-          `🕐 Час: ${new Date().toLocaleString("uk-UA", {
-            timeZone: "Europe/Kyiv"
-          })}`
+          `🕐 Час: ${new Date().toLocaleString(
+            "uk-UA",
+            {
+              timeZone: "Europe/Kyiv"
+            }
+          )}`
         ].join("\n");
-
         // ---------------------------------------------------------
         // Telegram
         // ---------------------------------------------------------
-
         if (env.BOT_TOKEN && env.CHAT_ID) {
           try {
             await fetch(
@@ -640,7 +668,6 @@ export default {
             );
           }
         }
-
         return json({
           ok: true,
           request: {
@@ -648,37 +675,32 @@ export default {
             request_code: requestCode,
             client_id: client?.id || null,
             status: "new",
-            status_label: STATUS_LABELS.new
+            status_label:
+              STATUS_LABELS.new
           }
         }, cors);
       }
-
-
       // =========================================================
       // 404
       // =========================================================
-
       return json({
         ok: false,
         error: "Not found"
       }, cors, 404);
-
     } catch (error) {
       console.error(error);
-
       return json({
         ok: false,
-        error: error?.message || String(error)
+        error:
+          error?.message ||
+          String(error)
       }, cors, 500);
     }
   }
 };
-
-
 // =============================================================
 // Helpers
 // =============================================================
-
 function json(data, cors, status = 200) {
   return new Response(
     JSON.stringify(data),
@@ -686,13 +708,12 @@ function json(data, cors, status = 200) {
       status,
       headers: {
         ...cors,
-        "Content-Type": "application/json; charset=utf-8"
+        "Content-Type":
+          "application/json; charset=utf-8"
       }
     }
   );
 }
-
-
 function normalizePhone(phone) {
   return String(phone || "")
     .replace(/[^\d+]/g, "");
