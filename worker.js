@@ -30,6 +30,82 @@ export default {
     const url = new URL(request.url);
 
     // ==========================================
+    // GET /requests
+    // СПИСОК УСІХ ЗАЯВОК
+    // ==========================================
+
+    if (
+      request.method === "GET" &&
+      url.pathname === "/requests"
+    ) {
+      try {
+
+        if (!env.DB) {
+          throw new Error("DB binding is NOT available");
+        }
+
+        const requestsResult = await env.DB
+          .prepare(`
+            SELECT
+              id,
+              request_code,
+
+              client_id,
+              object_id,
+
+              type,
+              type_label,
+
+              name,
+              phone,
+              location,
+
+              timing,
+              project,
+              consultation_date,
+
+              source,
+              status,
+
+              created_at,
+              updated_at
+
+            FROM requests
+
+            ORDER BY id DESC
+          `)
+          .all();
+
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            requests:
+              requestsResult.results || [],
+          }),
+          {
+            status: 200,
+            headers: jsonHeaders,
+          }
+        );
+
+      } catch (error) {
+
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error:
+              error?.message ||
+              "Unknown D1 error",
+          }),
+          {
+            status: 500,
+            headers: jsonHeaders,
+          }
+        );
+      }
+    }
+
+    // ==========================================
     // GET /request/:requestCode
     // ==========================================
 
@@ -97,10 +173,6 @@ export default {
             }
           );
         }
-
-        // ========================================
-        // RESPONSE
-        // ========================================
 
         return new Response(
           JSON.stringify({
