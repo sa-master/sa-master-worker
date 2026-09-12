@@ -1,9 +1,21 @@
+const STATUS_LABELS = {
+  new: "Нова",
+  processing: "Опрацювання",
+  estimate: "Прорахунок",
+  approved: "Погоджено",
+  scheduled: "Заплановано",
+  installation: "Монтаж",
+  completed: "Завершено",
+  service: "Сервіс",
+  cancelled: "Відмова / Неактуально"
+};
+
 export default {
   async fetch(request, env) {
     const cors = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Headers": "Content-Type"
     };
 
     if (request.method === "OPTIONS") {
@@ -14,21 +26,6 @@ export default {
     const path = url.pathname;
 
     try {
-      // =========================================================
-      // STATUS CONFIG
-      // =========================================================
-
-      const STATUS_LABELS = {
-        new: "Нова",
-        processing: "Опрацювання",
-        estimate: "Прорахунок",
-        approved: "Погоджено",
-        scheduled: "Заплановано",
-        installation: "Монтаж",
-        completed: "Завершено",
-        service: "Сервіс",
-        cancelled: "Відмова / Неактуально",
-      };
 
       // =========================================================
       // GET /
@@ -41,64 +38,41 @@ export default {
           CHAT_ID: !!env.CHAT_ID,
           DB: !!env.DB,
           bindings: Object.keys(env),
-          statuses: STATUS_LABELS,
-        });
+          statuses: STATUS_LABELS
+        }, cors);
       }
+
 
       // =========================================================
       // GET /requests
       // =========================================================
 
       if (request.method === "GET" && path === "/requests") {
-        if (!env.DB) {
-          return json(
-            {
-              ok: false,
-              error: "DB binding missing",
-            },
-            500
-          );
-        }
-
         const result = await env.DB.prepare(`
           SELECT
-            id,
-            request_code,
-            client_id,
-            object_id,
-            type,
-            type_label,
-            name,
-            phone,
-            location,
-            timing,
-            project,
-            consultation_date,
-            source,
-            status,
-            created_at,
-            updated_at
-          FROM requests
-          ORDER BY id DESC
+            r.*,
+            c.id AS client_id,
+            c.name AS client_name,
+            c.phone AS client_phone
+          FROM requests r
+          LEFT JOIN clients c ON c.id = r.client_id
+          ORDER BY r.id DESC
         `).all();
 
-        const requests = (result.results || []).map((item) => ({
-          ...item,
-          status_label:
-            STATUS_LABELS[item.status] ||
-            item.status ||
-            "Невідомо",
+        const requests = (result.results || []).map(r => ({
+          ...r,
+          status_label: STATUS_LABELS[r.status] || r.status || "Невідомо"
         }));
 
         return json({
           ok: true,
-          requests,
-        });
+          requests
+        }, cors);
       }
+
 
       // =========================================================
       // POST /request/:requestCode/client
-      // Manual find/create client
       // =========================================================
 
       if (
@@ -113,127 +87,53 @@ export default {
             .replace(/\/+$/, "")
         );
 
-        if (!requestCode) {
-          return json(
-            {
-              ok: false,
-              error: "Request code missing",
-            },
-            400
-          );
-        }
-
         const requestResult = await env.DB.prepare(`
-          SELECT
-            id,
-            request_code,
-            client_id,
-            object_id,
-            type,
-            type_label,
-            name,
-            phone,
-            location,
-            timing,
-            project,
-            consultation_date,
-            source,
-            status,
-            created_at,
-            updated_at
+          SELECT *
           FROM requests
           WHERE request_code = ?
           LIMIT 1
-        `)
-          .bind(requestCode)
-          .all();
+        `).bind(requestCode).all();
 
-        if (
-          !requestResult.results ||
-          !requestResult.results.length
-        ) {
-          return json(
-            {
-              ok: false,
-              error: "Request not found",
-              requestCode,
-            },
-            404
-          );
+        if (!requestResult.results || !requestResult.results.length) {
+          return json({
+            ok: false,
+            error: "Заявку не знайдено"
+          }, cors, 404);
         }
 
         const req = requestResult.results[0];
 
-        // Already linked
         if (req.client_id) {
-          const existingClient = await env.DB.prepare(`
-            SELECT
-              id,
-              name,
-              phone,
-              telegram_id,
-              created_at
+          const clientResult = await env.DB.prepare(`
+            SELECT *
             FROM clients
             WHERE id = ?
             LIMIT 1
-          `)
-            .bind(req.client_id)
-            .all();
+          `).bind(req.client_id).all();
 
-          if (
-            existingClient.results &&
-            existingClient.results.length
-          ) {
-            return json({
-              ok: true,
-              created: false,
-              existing: true,
-              request: {
-                ...req,
-                status_label:
-                  STATUS_LABELS[req.status] ||
-                  req.status ||
-                  "Невідомо",
-              },
-              client: existingClient.results[0],
-            });
-          }
+          return json({
+            ok: true,
+            created: false,
+            existing: true,
+            request: req,
+            client: clientResult.results?.[0] || null
+          }, cors);
         }
 
         const normalizedPhone = normalizePhone(req.phone);
 
-        if (!normalizedPhone) {
-          return json(
-            {
-              ok: false,
-              error: "Phone is missing in request",
-            },
-            400
-          );
-        }
-
-        const clientResult = await env.DB.prepare(`
-          SELECT
-            id,
-            name,
-            phone,
-            telegram_id,
-            created_at
+        let clientResult = await env.DB.prepare(`
+          SELECT *
           FROM clients
           WHERE phone = ?
           LIMIT 1
-        `)
-          .bind(normalizedPhone)
-          .all();
+        `).bind(normalizedPhone).all();
 
         let client;
         let created = false;
         let existing = false;
 
-        if (
-          clientResult.results &&
-          clientResult.results.length
-        ) {
+        if (clientResult.results && clientResult.results.length) {
           client = clientResult.results[0];
           existing = true;
         } else {
@@ -243,108 +143,57 @@ export default {
               phone
             )
             VALUES (?, ?)
-            RETURNING
-              id,
-              name,
-              phone,
-              telegram_id,
-              created_at
-          `)
-            .bind(req.name, normalizedPhone)
-            .all();
+          `).bind(
+            req.name,
+            normalizedPhone
+          ).run();
 
-          if (
-            !insertClient.results ||
-            !insertClient.results.length
-          ) {
-            return json(
-              {
-                ok: false,
-                error: "Failed to create client",
-              },
-              500
-            );
+          if (!insertClient.meta?.last_row_id) {
+            return json({
+              ok: false,
+              error: "Не вдалося створити клієнта"
+            }, cors, 500);
           }
 
-          client = insertClient.results[0];
+          const newClientId = insertClient.meta.last_row_id;
+
+          const newClientResult = await env.DB.prepare(`
+            SELECT *
+            FROM clients
+            WHERE id = ?
+            LIMIT 1
+          `).bind(newClientId).all();
+
+          client = newClientResult.results?.[0] || null;
           created = true;
         }
 
-        const attachResult = await env.DB.prepare(`
+        await env.DB.prepare(`
           UPDATE requests
-          SET
-            client_id = ?,
-            updated_at = CURRENT_TIMESTAMP
+          SET client_id = ?,
+              updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
-        `)
-          .bind(client.id, req.id)
-          .run();
-
-        if (
-          !attachResult.meta ||
-          attachResult.meta.changes !== 1
-        ) {
-          return json(
-            {
-              ok: false,
-              error:
-                "Client found/created but could not be attached",
-              requestCode,
-              clientId: client.id,
-            },
-            500
-          );
-        }
-
-        const updatedRequestResult = await env.DB.prepare(`
-          SELECT
-            id,
-            request_code,
-            client_id,
-            object_id,
-            type,
-            type_label,
-            name,
-            phone,
-            location,
-            timing,
-            project,
-            consultation_date,
-            source,
-            status,
-            created_at,
-            updated_at
-          FROM requests
-          WHERE id = ?
-          LIMIT 1
-        `)
-          .bind(req.id)
-          .all();
-
-        const updatedRequest =
-          updatedRequestResult.results &&
-          updatedRequestResult.results.length
-            ? updatedRequestResult.results[0]
-            : req;
+        `).bind(
+          client.id,
+          req.id
+        ).run();
 
         return json({
           ok: true,
           created,
           existing,
           request: {
-            ...updatedRequest,
-            status_label:
-              STATUS_LABELS[updatedRequest.status] ||
-              updatedRequest.status ||
-              "Невідомо",
+            ...req,
+            client_id: client.id
           },
-          client,
-        });
+          client
+        }, cors);
       }
+
 
       // =========================================================
       // POST /request/:requestCode/status
-      // Change request status
+      // Зміна статусу + запис події в events
       // =========================================================
 
       if (
@@ -359,125 +208,120 @@ export default {
             .replace(/\/+$/, "")
         );
 
-        if (!requestCode) {
-          return json(
-            {
-              ok: false,
-              error: "Request code missing",
-            },
-            400
-          );
-        }
-
         let body;
 
         try {
           body = await request.json();
         } catch {
-          return json(
-            {
-              ok: false,
-              error: "Invalid JSON body",
-            },
-            400
-          );
+          return json({
+            ok: false,
+            error: "Некоректний JSON"
+          }, cors, 400);
         }
 
-        const newStatus =
-          String(body.status || "").trim();
+        const newStatus = String(body.status || "").trim();
 
-        // Check that status is allowed
         if (!STATUS_LABELS[newStatus]) {
-          return json(
-            {
-              ok: false,
-              error: "Invalid status",
-              allowed_statuses: Object.keys(
-                STATUS_LABELS
-              ),
-            },
-            400
-          );
+          return json({
+            ok: false,
+            error: "Невідомий статус",
+            allowed_statuses: STATUS_LABELS
+          }, cors, 400);
         }
 
-        // Find request
-        const requestResult =
-          await env.DB.prepare(`
-            SELECT
-              id,
-              request_code,
-              status
-            FROM requests
-            WHERE request_code = ?
-            LIMIT 1
-          `)
-            .bind(requestCode)
-            .all();
+        const requestResult = await env.DB.prepare(`
+          SELECT id, request_code, status
+          FROM requests
+          WHERE request_code = ?
+          LIMIT 1
+        `).bind(requestCode).all();
 
-        if (
-          !requestResult.results ||
-          !requestResult.results.length
-        ) {
-          return json(
-            {
-              ok: false,
-              error: "Request not found",
-            },
-            404
-          );
+        if (!requestResult.results || !requestResult.results.length) {
+          return json({
+            ok: false,
+            error: "Заявку не знайдено"
+          }, cors, 404);
         }
 
-        const currentRequest =
-          requestResult.results[0];
+        const currentRequest = requestResult.results[0];
+        const oldStatus = currentRequest.status;
 
-        const oldStatus =
-          currentRequest.status;
-
-        // Update status
-        const updateResult =
-          await env.DB.prepare(`
-            UPDATE requests
-            SET
-              status = ?,
+        // Оновлюємо статус заявки
+        const updateResult = await env.DB.prepare(`
+          UPDATE requests
+          SET status = ?,
               updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-          `)
-            .bind(
-              newStatus,
-              currentRequest.id
-            )
-            .run();
+          WHERE id = ?
+        `).bind(
+          newStatus,
+          currentRequest.id
+        ).run();
 
-        if (
-          !updateResult.meta ||
-          updateResult.meta.changes !== 1
-        ) {
-          return json(
-            {
-              ok: false,
-              error: "Status could not be updated",
-            },
-            500
-          );
+        if (updateResult.meta && updateResult.meta.changes !== 1) {
+          return json({
+            ok: false,
+            error: "Статус заявки не було змінено"
+          }, cors, 500);
+        }
+
+        // ---------------------------------------------------------
+        // Записуємо історію зміни статусу
+        // ---------------------------------------------------------
+
+        const oldStatusLabel =
+          STATUS_LABELS[oldStatus] || oldStatus || "Невідомо";
+
+        const newStatusLabel =
+          STATUS_LABELS[newStatus];
+
+        const eventContent =
+          `${oldStatusLabel} → ${newStatusLabel}`;
+
+        const eventResult = await env.DB.prepare(`
+          INSERT INTO events (
+            object_id,
+            request_id,
+            event_type,
+            content,
+            author_type
+          )
+          VALUES (?, ?, ?, ?, ?)
+        `).bind(
+          null,
+          currentRequest.id,
+          "status_changed",
+          eventContent,
+          "system"
+        ).run();
+
+        if (eventResult.meta && eventResult.meta.changes !== 1) {
+          return json({
+            ok: false,
+            error: "Статус змінено, але подію не вдалося записати"
+          }, cors, 500);
         }
 
         return json({
           ok: true,
           request: {
             id: currentRequest.id,
-            request_code:
-              currentRequest.request_code,
+            request_code: currentRequest.request_code,
+
             old_status: oldStatus,
-            old_status_label:
-              STATUS_LABELS[oldStatus] ||
-              oldStatus ||
-              "Невідомо",
+            old_status_label: oldStatusLabel,
+
             status: newStatus,
-            status_label:
-              STATUS_LABELS[newStatus],
+            status_label: newStatusLabel
           },
-        });
+
+          event: {
+            event_type: "status_changed",
+            content: eventContent,
+            author_type: "system"
+          }
+        }, cors);
       }
+
 
       // =========================================================
       // GET /request/:requestCode
@@ -493,52 +337,22 @@ export default {
             .replace(/\/+$/, "")
         );
 
-        if (!requestCode) {
-          return json(
-            {
-              ok: false,
-              error: "Request code missing",
-            },
-            400
-          );
-        }
-
         const result = await env.DB.prepare(`
           SELECT
-            id,
-            request_code,
-            client_id,
-            object_id,
-            type,
-            type_label,
-            name,
-            phone,
-            location,
-            timing,
-            project,
-            consultation_date,
-            source,
-            status,
-            created_at,
-            updated_at
-          FROM requests
-          WHERE request_code = ?
+            r.*,
+            c.name AS client_name,
+            c.phone AS client_phone
+          FROM requests r
+          LEFT JOIN clients c ON c.id = r.client_id
+          WHERE r.request_code = ?
           LIMIT 1
-        `)
-          .bind(requestCode)
-          .all();
+        `).bind(requestCode).all();
 
-        if (
-          !result.results ||
-          !result.results.length
-        ) {
-          return json(
-            {
-              ok: false,
-              error: "Request not found",
-            },
-            404
-          );
+        if (!result.results || !result.results.length) {
+          return json({
+            ok: false,
+            error: "Заявку не знайдено"
+          }, cors, 404);
         }
 
         const requestData = result.results[0];
@@ -550,10 +364,11 @@ export default {
             status_label:
               STATUS_LABELS[requestData.status] ||
               requestData.status ||
-              "Невідомо",
-          },
-        });
+              "Невідомо"
+          }
+        }, cors);
       }
+
 
       // =========================================================
       // GET /object/:objectCode
@@ -569,721 +384,316 @@ export default {
             .replace(/\/+$/, "")
         );
 
-        if (!objectCode) {
-          return json(
-            {
-              ok: false,
-              error: "Object code missing",
-            },
-            400
-          );
-        }
-
-        const objectResult = await env.DB.prepare(`
+        const result = await env.DB.prepare(`
           SELECT
-            id,
-            object_code,
-            client_id,
-            name,
-            address,
-            work_type,
-            status,
-            planned_start_date,
-            created_at,
-            updated_at
-          FROM objects
-          WHERE object_code = ?
+            o.*,
+            c.name AS client_name,
+            c.phone AS client_phone
+          FROM objects o
+          LEFT JOIN clients c ON c.id = o.client_id
+          WHERE o.object_code = ?
           LIMIT 1
-        `)
-          .bind(objectCode)
-          .all();
+        `).bind(objectCode).all();
 
-        if (
-          !objectResult.results ||
-          !objectResult.results.length
-        ) {
-          return json(
-            {
-              ok: false,
-              error: "Object not found",
-            },
-            404
-          );
+        if (!result.results || !result.results.length) {
+          return json({
+            ok: false,
+            error: "Об'єкт не знайдено"
+          }, cors, 404);
         }
 
-        const object = objectResult.results[0];
-
-        const clientResult = await env.DB.prepare(`
-          SELECT
-            id,
-            name,
-            phone,
-            telegram_id,
-            created_at
-          FROM clients
-          WHERE id = ?
-          LIMIT 1
-        `)
-          .bind(object.client_id)
-          .all();
-
-        const estimatesResult = await env.DB.prepare(`
-          SELECT
-            id,
-            object_id,
-            title,
-            status,
-            created_at,
-            updated_at
-          FROM estimates
-          WHERE object_id = ?
-          ORDER BY id DESC
-        `)
-          .bind(object.id)
-          .all();
-
-        const estimates = estimatesResult.results || [];
-
-        let estimateItems = [];
-
-        if (estimates.length) {
-          const ids = estimates.map(
-            (estimate) => estimate.id
-          );
-
-          const placeholders = ids
-            .map(() => "?")
-            .join(",");
-
-          const itemsResult = await env.DB.prepare(`
-            SELECT
-              id,
-              estimate_id,
-              description,
-              quantity,
-              unit_price,
-              total,
-              created_at
-            FROM estimate_items
-            WHERE estimate_id IN (${placeholders})
-            ORDER BY id ASC
-          `)
-            .bind(...ids)
-            .all();
-
-          estimateItems = itemsResult.results || [];
-        }
-
-        const paymentsResult = await env.DB.prepare(`
-          SELECT
-            id,
-            object_id,
-            type,
-            amount,
-            description,
-            created_at
-          FROM payments
-          WHERE object_id = ?
-          ORDER BY id DESC
-        `)
-          .bind(object.id)
-          .all();
-
-        const payments = paymentsResult.results || [];
-
-        let totalEstimate = 0;
-
-        for (const item of estimateItems) {
-          totalEstimate += Number(item.total || 0);
-        }
-
-        let totalPayments = 0;
-
-        for (const payment of payments) {
-          totalPayments += Number(payment.amount || 0);
-        }
-
-        const balance =
-          totalEstimate - totalPayments;
-
-        const eventsResult = await env.DB.prepare(`
-          SELECT
-            id,
-            object_id,
-            event_type,
-            content,
-            author_type,
-            author_id,
-            created_at
-          FROM events
-          WHERE object_id = ?
-          ORDER BY id DESC
-        `)
-          .bind(object.id)
-          .all();
-
-        const importantResult = await env.DB.prepare(`
-          SELECT
-            id,
-            object_id,
-            title,
-            content,
-            file_id,
-            created_at,
-            created_by
-          FROM important
-          WHERE object_id = ?
-          ORDER BY id DESC
-        `)
-          .bind(object.id)
-          .all();
-
-        const filesResult = await env.DB.prepare(`
-          SELECT
-            id,
-            object_id,
-            name,
-            file_type,
-            storage_key,
-            version,
-            uploaded_by,
-            created_at
-          FROM files
-          WHERE object_id = ?
-          ORDER BY id DESC
-        `)
-          .bind(object.id)
-          .all();
+        const objectData = result.results[0];
 
         return json({
           ok: true,
-
           object: {
-            ...object,
+            ...objectData,
             status_label:
-              STATUS_LABELS[object.status] ||
-              object.status ||
-              "Невідомо",
-          },
-
-          client:
-            clientResult.results &&
-            clientResult.results.length
-              ? clientResult.results[0]
-              : null,
-
-          estimates,
-
-          estimate_items: estimateItems,
-
-          payments,
-
-          financial: {
-            total_estimate: totalEstimate,
-            total_payments: totalPayments,
-            balance,
-          },
-
-          events:
-            eventsResult.results || [],
-
-          important:
-            importantResult.results || [],
-
-          files:
-            filesResult.results || [],
-        });
+              STATUS_LABELS[objectData.status] ||
+              objectData.status ||
+              "Невідомо"
+          }
+        }, cors);
       }
+
 
       // =========================================================
       // POST /
-      // Create new request
+      // Створення нової заявки
       // =========================================================
 
       if (
         request.method === "POST" &&
         path === "/"
       ) {
-        if (!env.DB) {
-          return json(
-            {
-              ok: false,
-              error: "DB binding missing",
-            },
-            500
-          );
-        }
-
-        if (!env.BOT_TOKEN) {
-          return json(
-            {
-              ok: false,
-              error: "BOT_TOKEN secret missing",
-            },
-            500
-          );
-        }
-
-        if (!env.CHAT_ID) {
-          return json(
-            {
-              ok: false,
-              error: "CHAT_ID secret missing",
-            },
-            500
-          );
-        }
-
         let body;
 
         try {
           body = await request.json();
         } catch {
-          return json(
-            {
-              ok: false,
-              error: "Invalid JSON body",
-            },
-            400
-          );
+          return json({
+            ok: false,
+            error: "Некоректний JSON"
+          }, cors, 400);
         }
 
-        const name =
-          String(body.name || "").trim();
-
-        const phone =
-          String(body.phone || "").trim();
-
-        const type =
-          String(body.type || "").trim();
-
-        const typeLabel =
-          String(body.typeLabel || "").trim();
-
-        const location =
-          String(body.location || "").trim();
-
-        const timing =
-          String(body.timing || "").trim();
-
-        const project =
-          String(body.project || "").trim();
-
+        const name = String(body.name || "").trim();
+        const phone = String(body.phone || "").trim();
+        const type = String(body.type || "").trim();
+        const typeLabel = String(body.typeLabel || "").trim();
+        const location = String(body.location || "").trim();
+        const timing = String(body.timing || "").trim();
+        const project = String(body.project || "").trim();
         const consultationDate =
-          String(
-            body.consultationDate || ""
-          ).trim();
+          String(body.consultationDate || "").trim();
 
         const source =
-          String(
-            body.source || "SA-MASTER.PRO"
-          ).trim();
+          String(body.source || "SA-MASTER.PRO").trim();
 
-        if (!name) {
-          return json(
-            {
-              ok: false,
-              error: "Name is required",
-            },
-            400
-          );
+        if (!name || !phone || !type) {
+          return json({
+            ok: false,
+            error: "Необхідні ім'я, телефон та тип заявки"
+          }, cors, 400);
         }
 
-        if (!phone) {
-          return json(
-            {
-              ok: false,
-              error: "Phone is required",
-            },
-            400
-          );
-        }
+        // ---------------------------------------------------------
+        // Створюємо код заявки
+        // ---------------------------------------------------------
 
-        const normalizedPhone =
-          normalizePhone(phone);
+        const countResult = await env.DB.prepare(`
+          SELECT COUNT(*) AS count
+          FROM requests
+          WHERE request_code LIKE 'SM-R-2026-%'
+        `).all();
 
-        if (!normalizedPhone) {
-          return json(
-            {
-              ok: false,
-              error: "Phone is invalid",
-            },
-            400
-          );
-        }
-
-        const labels = {
-          complex: "Комплексний монтаж",
-          local: "Локальний монтаж",
-          consultation: "Консультація",
-          estimate: "Прорахунок",
-        };
-
-        const finalTypeLabel =
-          typeLabel ||
-          labels[type] ||
-          type ||
-          "Не вказано";
-
-        // -------------------------------------------------------
-        // Create request
-        // -------------------------------------------------------
-
-        const insertResult =
-          await env.DB.prepare(`
-            INSERT INTO requests (
-              type,
-              type_label,
-              name,
-              phone,
-              location,
-              timing,
-              project,
-              consultation_date,
-              source,
-              status
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')
-            RETURNING id
-          `)
-            .bind(
-              type,
-              finalTypeLabel,
-              name,
-              phone,
-              location || null,
-              timing || null,
-              project || null,
-              consultationDate || null,
-              source || "SA-MASTER.PRO"
-            )
-            .all();
-
-        if (
-          !insertResult.results ||
-          !insertResult.results.length
-        ) {
-          return json(
-            {
-              ok: false,
-              error: "Failed to create request",
-            },
-            500
-          );
-        }
-
-        const requestDbId =
-          insertResult.results[0].id;
-
-        // -------------------------------------------------------
-        // Generate request code
-        // -------------------------------------------------------
-
-        const year =
-          new Date().getFullYear();
+        const count =
+          Number(countResult.results?.[0]?.count || 0) + 1;
 
         const requestCode =
-          `SM-R-${year}-${String(
-            requestDbId
-          ).padStart(3, "0")}`;
+          `SM-R-2026-${String(count).padStart(3, "0")}`;
 
-        await env.DB.prepare(`
-          UPDATE requests
-          SET
-            request_code = ?,
-            updated_at = CURRENT_TIMESTAMP
-          WHERE id = ?
-        `)
-          .bind(
-            requestCode,
-            requestDbId
+        // ---------------------------------------------------------
+        // Створюємо заявку
+        // ---------------------------------------------------------
+
+        const insertResult = await env.DB.prepare(`
+          INSERT INTO requests (
+            request_code,
+            type,
+            type_label,
+            name,
+            phone,
+            location,
+            timing,
+            project,
+            consultation_date,
+            source,
+            status
           )
-          .run();
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).bind(
+          requestCode,
+          type,
+          typeLabel,
+          name,
+          phone,
+          location || null,
+          timing || null,
+          project || null,
+          consultationDate || null,
+          source,
+          "new"
+        ).run();
 
-        // -------------------------------------------------------
-        // Find existing client
-        // or create new client
-        // -------------------------------------------------------
+        if (!insertResult.meta?.last_row_id) {
+          return json({
+            ok: false,
+            error: "Не вдалося створити заявку"
+          }, cors, 500);
+        }
 
-        const clientResult =
-          await env.DB.prepare(`
-            SELECT
-              id,
-              name,
-              phone,
-              telegram_id,
-              created_at
-            FROM clients
-            WHERE phone = ?
-            LIMIT 1
-          `)
-            .bind(normalizedPhone)
-            .all();
+        const requestId = insertResult.meta.last_row_id;
+
+        // ---------------------------------------------------------
+        // Автоматично знаходимо / створюємо клієнта
+        // ---------------------------------------------------------
+
+        const normalizedPhone = normalizePhone(phone);
+
+        let clientResult = await env.DB.prepare(`
+          SELECT *
+          FROM clients
+          WHERE phone = ?
+          LIMIT 1
+        `).bind(normalizedPhone).all();
 
         let client;
-        let clientCreated = false;
 
-        if (
-          clientResult.results &&
-          clientResult.results.length
-        ) {
+        if (clientResult.results && clientResult.results.length) {
           client = clientResult.results[0];
         } else {
-          const insertClient =
-            await env.DB.prepare(`
-              INSERT INTO clients (
-                name,
-                phone
-              )
-              VALUES (?, ?)
-              RETURNING
-                id,
-                name,
-                phone,
-                telegram_id,
-                created_at
-            `)
-              .bind(
-                name,
-                normalizedPhone
-              )
-              .all();
+          const clientInsert = await env.DB.prepare(`
+            INSERT INTO clients (
+              name,
+              phone
+            )
+            VALUES (?, ?)
+          `).bind(
+            name,
+            normalizedPhone
+          ).run();
 
-          if (
-            !insertClient.results ||
-            !insertClient.results.length
-          ) {
-            return json(
-              {
-                ok: false,
-                error:
-                  "Request created but client creation failed",
-                requestId: requestCode,
-              },
-              500
-            );
+          if (clientInsert.meta?.last_row_id) {
+            const createdClient = await env.DB.prepare(`
+              SELECT *
+              FROM clients
+              WHERE id = ?
+              LIMIT 1
+            `).bind(clientInsert.meta.last_row_id).all();
+
+            client = createdClient.results?.[0] || null;
           }
-
-          client =
-            insertClient.results[0];
-
-          clientCreated = true;
         }
 
-        // -------------------------------------------------------
-        // Attach client to request
-        // -------------------------------------------------------
+        // ---------------------------------------------------------
+        // Прив'язуємо клієнта до заявки
+        // ---------------------------------------------------------
 
-        const attachResult =
+        if (client) {
           await env.DB.prepare(`
             UPDATE requests
-            SET
-              client_id = ?,
-              updated_at = CURRENT_TIMESTAMP
+            SET client_id = ?,
+                updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
-          `)
-            .bind(
-              client.id,
-              requestDbId
-            )
-            .run();
-
-        if (
-          !attachResult.meta ||
-          attachResult.meta.changes !== 1
-        ) {
-          return json(
-            {
-              ok: false,
-              error:
-                "Request created but client could not be attached",
-              requestId: requestCode,
-              clientId: client.id,
-            },
-            500
-          );
+          `).bind(
+            client.id,
+            requestId
+          ).run();
         }
 
-        // -------------------------------------------------------
-        // Get saved request
-        // -------------------------------------------------------
+        // ---------------------------------------------------------
+        // Перша подія заявки
+        // ---------------------------------------------------------
 
-        const requestResult =
-          await env.DB.prepare(`
-            SELECT
-              id,
-              request_code,
-              client_id,
-              object_id,
-              type,
-              type_label,
-              name,
-              phone,
-              location,
-              timing,
-              project,
-              consultation_date,
-              source,
-              status,
-              created_at,
-              updated_at
-            FROM requests
-            WHERE id = ?
-            LIMIT 1
-          `)
-            .bind(requestDbId)
-            .all();
+        await env.DB.prepare(`
+          INSERT INTO events (
+            object_id,
+            request_id,
+            event_type,
+            content,
+            author_type
+          )
+          VALUES (?, ?, ?, ?, ?)
+        `).bind(
+          null,
+          requestId,
+          "request_created",
+          "Створено заявку",
+          "system"
+        ).run();
 
-        const savedRequest =
-          requestResult.results &&
-          requestResult.results.length
-            ? requestResult.results[0]
-            : null;
+        // ---------------------------------------------------------
+        // Дані для Telegram
+        // ---------------------------------------------------------
 
-        // -------------------------------------------------------
-        // Telegram notification
-        // -------------------------------------------------------
+        const telegramText = [
+          "🏠 НОВА ЗАЯВКА",
+          `🆔 ID: ${requestCode}`,
+          `👤 Ім'я: ${name}`,
+          `📞 Телефон: ${phone}`,
+          `🔧 Тип: ${typeLabel || type}`,
+          `📍 Об'єкт: ${location || "—"}`,
+          `📐 Дизайн-проєкт: ${project || "—"}`,
+          `🗓 Початок: ${timing || "—"}`,
+          `📅 Консультація: ${consultationDate || "—"}`,
+          `🔗 Джерело: ${source}`,
+          `📊 Статус: ${STATUS_LABELS.new}`,
+          `🕐 Час: ${new Date().toLocaleString("uk-UA", {
+            timeZone: "Europe/Kyiv"
+          })}`
+        ].join("\n");
 
-        const now =
-          new Date().toLocaleString(
-            "uk-UA",
-            {
-              timeZone: "Europe/Kyiv",
-              hour12: false,
-            }
-          );
+        // ---------------------------------------------------------
+        // Telegram
+        // ---------------------------------------------------------
 
-        const telegramText = `
-🏠 НОВА ЗАЯВКА
-
-🆔 ID: ${requestCode}
-
-👤 Ім'я: ${name}
-📞 Телефон: ${phone}
-
-🔧 Тип: ${finalTypeLabel}
-📍 Об'єкт: ${location || "—"}
-📐 Дизайн-проєкт: ${project || "—"}
-🗓 Початок: ${timing || "—"}
-📅 Консультація: ${consultationDate || "—"}
-
-🔗 Джерело: ${source || "SA-MASTER.PRO"}
-📊 Статус: ${STATUS_LABELS.new}
-🕐 Час: ${now}
-`.trim();
-
-        const telegramResponse =
-          await fetch(
-            `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type":
-                  "application/json",
-              },
-              body: JSON.stringify({
-                chat_id: env.CHAT_ID,
-                text: telegramText,
-              }),
-            }
-          );
-
-        const telegramData =
-          await telegramResponse.json();
-
-        if (
-          !telegramResponse.ok ||
-          !telegramData.ok
-        ) {
-          console.error(
-            "Telegram error:",
-            telegramData
-          );
-
-          return json(
-            {
-              ok: false,
-              error:
-                "Request saved but Telegram notification failed",
-              requestId: requestCode,
-            },
-            500
-          );
+        if (env.BOT_TOKEN && env.CHAT_ID) {
+          try {
+            await fetch(
+              `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                  chat_id: env.CHAT_ID,
+                  text: telegramText
+                })
+              }
+            );
+          } catch (telegramError) {
+            console.error(
+              "Telegram error:",
+              telegramError
+            );
+          }
         }
 
         return json({
           ok: true,
-
-          requestId:
-            requestCode,
-
-          request: savedRequest
-            ? {
-                ...savedRequest,
-                status_label:
-                  STATUS_LABELS[
-                    savedRequest.status
-                  ] ||
-                  savedRequest.status ||
-                  "Невідомо",
-              }
-            : null,
-
-          client: {
-            id: client.id,
-            created: clientCreated,
-          },
-        });
+          request: {
+            id: requestId,
+            request_code: requestCode,
+            client_id: client?.id || null,
+            status: "new",
+            status_label: STATUS_LABELS.new
+          }
+        }, cors);
       }
+
 
       // =========================================================
       // 404
       // =========================================================
 
-      return json(
-        {
-          ok: false,
-          error: "Not found",
-        },
-        404
-      );
+      return json({
+        ok: false,
+        error: "Not found"
+      }, cors, 404);
 
     } catch (error) {
       console.error(error);
 
-      return json(
-        {
-          ok: false,
-          error:
-            error?.message ||
-            String(error),
-        },
-        500
-      );
+      return json({
+        ok: false,
+        error: error?.message || String(error)
+      }, cors, 500);
     }
-
-    // =========================================================
-    // HELPERS
-    // =========================================================
-
-    function json(data, status = 200) {
-      return new Response(
-        JSON.stringify(data),
-        {
-          status,
-          headers: {
-            ...cors,
-            "Content-Type":
-              "application/json; charset=utf-8",
-          },
-        }
-      );
-    }
-
-    function normalizePhone(phone) {
-      return String(phone || "")
-        .replace(/[^\d+]/g, "")
-        .trim();
-    }
-  },
+  }
 };
+
+
+// =============================================================
+// Helpers
+// =============================================================
+
+function json(data, cors, status = 200) {
+  return new Response(
+    JSON.stringify(data),
+    {
+      status,
+      headers: {
+        ...cors,
+        "Content-Type": "application/json; charset=utf-8"
+      }
+    }
+  );
+}
+
+
+function normalizePhone(phone) {
+  return String(phone || "")
+    .replace(/[^\d+]/g, "");
+}
