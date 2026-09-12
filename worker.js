@@ -1,6 +1,10 @@
 export default {
   async fetch(request, env) {
 
+    // ==========================================
+    // CORS
+    // ==========================================
+
     const cors = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -13,7 +17,7 @@ export default {
     };
 
     // ==========================================
-    // CORS PREFLIGHT
+    // PREFLIGHT
     // ==========================================
 
     if (request.method === "OPTIONS") {
@@ -26,8 +30,7 @@ export default {
     const url = new URL(request.url);
 
     // ==========================================
-    // GET /object/SM-2026-001
-    // Отримання об'єкта з D1
+    // GET /object/:objectCode
     // ==========================================
 
     if (
@@ -35,6 +38,7 @@ export default {
       url.pathname.startsWith("/object/")
     ) {
       try {
+
         if (!env.DB) {
           throw new Error("DB binding is NOT available");
         }
@@ -46,10 +50,6 @@ export default {
         if (!objectCode) {
           throw new Error("Object code is missing");
         }
-
-        // ------------------------------------------
-        // ОБ'ЄКТ + КЛІЄНТ
-        // ------------------------------------------
 
         const objectResult = await env.DB
           .prepare(`
@@ -96,9 +96,9 @@ export default {
 
         const objectId = objectResult.id;
 
-        // ------------------------------------------
-        // КОШТОРИСИ
-        // ------------------------------------------
+        // ========================================
+        // ESTIMATES
+        // ========================================
 
         const estimatesResult = await env.DB
           .prepare(`
@@ -108,19 +108,16 @@ export default {
               status,
               created_at,
               updated_at
-
             FROM estimates
-
             WHERE object_id = ?
-
             ORDER BY id DESC
           `)
           .bind(objectId)
           .all();
 
-        // ------------------------------------------
-        // ПОЗИЦІЇ КОШТОРИСУ
-        // ------------------------------------------
+        // ========================================
+        // ESTIMATE ITEMS
+        // ========================================
 
         const estimateItemsResult = await env.DB
           .prepare(`
@@ -131,22 +128,18 @@ export default {
               ei.quantity,
               ei.unit_price,
               ei.total
-
             FROM estimate_items ei
-
             JOIN estimates e
               ON e.id = ei.estimate_id
-
             WHERE e.object_id = ?
-
             ORDER BY ei.id
           `)
           .bind(objectId)
           .all();
 
-        // ------------------------------------------
-        // ФІНАНСОВІ ОПЕРАЦІЇ
-        // ------------------------------------------
+        // ========================================
+        // PAYMENTS
+        // ========================================
 
         const paymentsResult = await env.DB
           .prepare(`
@@ -156,19 +149,16 @@ export default {
               amount,
               description,
               created_at
-
             FROM payments
-
             WHERE object_id = ?
-
             ORDER BY id
           `)
           .bind(objectId)
           .all();
 
-        // ------------------------------------------
-        // ІСТОРІЯ
-        // ------------------------------------------
+        // ========================================
+        // EVENTS
+        // ========================================
 
         const eventsResult = await env.DB
           .prepare(`
@@ -179,19 +169,16 @@ export default {
               author_type,
               author_id,
               created_at
-
             FROM events
-
             WHERE object_id = ?
-
             ORDER BY id DESC
           `)
           .bind(objectId)
           .all();
 
-        // ------------------------------------------
-        // ВАЖЛИВЕ
-        // ------------------------------------------
+        // ========================================
+        // IMPORTANT
+        // ========================================
 
         const importantResult = await env.DB
           .prepare(`
@@ -202,19 +189,16 @@ export default {
               file_id,
               created_at,
               created_by
-
             FROM important
-
             WHERE object_id = ?
-
             ORDER BY id DESC
           `)
           .bind(objectId)
           .all();
 
-        // ------------------------------------------
-        // ФАЙЛИ
-        // ------------------------------------------
+        // ========================================
+        // FILES
+        // ========================================
 
         const filesResult = await env.DB
           .prepare(`
@@ -226,24 +210,20 @@ export default {
               version,
               uploaded_by,
               created_at
-
             FROM files
-
             WHERE object_id = ?
-
             ORDER BY id DESC
           `)
           .bind(objectId)
           .all();
 
-        // ------------------------------------------
-        // ФІНАНСОВИЙ ПІДСУМОК
-        // ------------------------------------------
+        // ========================================
+        // FINANCIAL
+        // ========================================
 
         const financialResult = await env.DB
           .prepare(`
             SELECT
-
               COALESCE(
                 SUM(
                   CASE
@@ -267,7 +247,6 @@ export default {
               ) AS spent
 
             FROM payments
-
             WHERE object_id = ?
           `)
           .bind(objectId)
@@ -283,9 +262,9 @@ export default {
 
         const balance = received - spent;
 
-        // ------------------------------------------
-        // ВІДПОВІДЬ
-        // ------------------------------------------
+        // ========================================
+        // RESPONSE
+        // ========================================
 
         return new Response(
           JSON.stringify({
@@ -342,7 +321,7 @@ export default {
 
     // ==========================================
     // GET /
-    // ДІАГНОСТИКА WORKER
+    // DIAGNOSTICS
     // ==========================================
 
     if (request.method === "GET") {
@@ -363,8 +342,7 @@ export default {
     }
 
     // ==========================================
-    // POST
-    // ЗАЯВКА З САЙТУ → TELEGRAM
+    // ONLY POST AFTER THIS POINT
     // ==========================================
 
     if (request.method !== "POST") {
@@ -381,6 +359,10 @@ export default {
       );
     }
 
+    // ==========================================
+    // POST — NEW REQUEST
+    // ==========================================
+
     try {
 
       if (!env.BOT_TOKEN) {
@@ -395,9 +377,15 @@ export default {
         );
       }
 
-      // ------------------------------------------
-      // JSON
-      // ------------------------------------------
+      if (!env.DB) {
+        throw new Error(
+          "DB binding is NOT available"
+        );
+      }
+
+      // ========================================
+      // READ JSON
+      // ========================================
 
       let data;
 
@@ -409,22 +397,68 @@ export default {
         );
       }
 
-      const {
-        name,
-        phone,
-        source,
-      } = data;
+      // ========================================
+      // HELPERS
+      // ========================================
 
-      // ------------------------------------------
-      // ПЕРЕВІРКА
-      // ------------------------------------------
+      const clean = (value) => {
+        if (
+          value === undefined ||
+          value === null
+        ) {
+          return "";
+        }
 
-      if (!name || !phone) {
+        return String(value).trim();
+      };
+
+      const name = clean(data.name);
+      const phone = clean(data.phone);
+      const type = clean(data.type);
+
+      const typeLabels = {
+        complex: "Комплексний монтаж",
+        local: "Локальний монтаж",
+        consultation: "Консультація",
+        estimate: "Прорахунок",
+      };
+
+      const typeLabel =
+        clean(data.typeLabel) ||
+        typeLabels[type] ||
+        type;
+
+      const location =
+        clean(data.location);
+
+      const timing =
+        clean(data.timing);
+
+      const project =
+        clean(data.project);
+
+      const consultationDate =
+        clean(data.consultationDate);
+
+      // На цьому етапі джерело за замовчуванням —
+      // сам сайт. Надалі тут можна буде використовувати
+      // UTM / QR / NFC / Instagram / Facebook тощо.
+
+      const source =
+        clean(data.source) ||
+        "SA-MASTER.PRO";
+
+      // ========================================
+      // VALIDATION
+      // ========================================
+
+      if (!name || !phone || !type) {
 
         return new Response(
           JSON.stringify({
             ok: false,
-            error: "Missing name or phone",
+            error:
+              "Missing name, phone or type",
           }),
           {
             status: 400,
@@ -433,39 +467,165 @@ export default {
         );
       }
 
-      // ------------------------------------------
-      // TELEGRAM MESSAGE
-      // ------------------------------------------
+      // ========================================
+      // 1. SAVE REQUEST TO D1
+      // ========================================
 
-      const text = `🏠 НОВА ЗАЯВКА
+      const insertResult = await env.DB
+        .prepare(`
+          INSERT INTO requests (
+            request_code,
+            client_id,
+            object_id,
+            type,
+            type_label,
+            name,
+            phone,
+            location,
+            timing,
+            project,
+            consultation_date,
+            source,
+            status
+          )
+
+          VALUES (
+            NULL,
+            NULL,
+            NULL,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            ?,
+            'new'
+          )
+        `)
+        .bind(
+          type,
+          typeLabel,
+          name,
+          phone,
+          location || null,
+          timing || null,
+          project || null,
+          consultationDate || null,
+          source,
+        )
+        .run();
+
+      const requestDbId =
+        insertResult?.meta?.last_row_id;
+
+      if (!requestDbId) {
+        throw new Error(
+          "Could not determine new request ID"
+        );
+      }
+
+      // ========================================
+      // 2. GENERATE REQUEST CODE
+      // ========================================
+
+      const year =
+        new Date().getFullYear();
+
+      const requestCode =
+        `SM-R-${year}-${String(requestDbId).padStart(3, "0")}`;
+
+      // ========================================
+      // 3. SAVE REQUEST CODE
+      // ========================================
+
+      await env.DB
+        .prepare(`
+          UPDATE requests
+
+          SET
+            request_code = ?,
+            updated_at = CURRENT_TIMESTAMP
+
+          WHERE id = ?
+        `)
+        .bind(
+          requestCode,
+          requestDbId
+        )
+        .run();
+
+      // ========================================
+      // 4. TELEGRAM MESSAGE
+      // ========================================
+
+      let text =
+`🏠 НОВА ЗАЯВКА
+
+🆔 ID: ${requestCode}
 
 👤 Ім'я: ${name}
 📞 Телефон: ${phone}
-🔗 Джерело: ${source || "сайт"}
-🕐 Час: ${new Date().toLocaleString("uk-UA")}`;
+
+🔧 Тип: ${typeLabel}`;
+
+      if (location) {
+        text +=
+          `\n📍 Об'єкт: ${location}`;
+      }
+
+      if (project) {
+        text +=
+          `\n📐 Дизайн-проєкт: ${project}`;
+      }
+
+      if (timing) {
+        text +=
+          `\n🗓 Початок: ${timing}`;
+      }
+
+      if (consultationDate) {
+        text +=
+          `\n📅 Консультація: ${consultationDate}`;
+      }
+
+      if (source) {
+        text +=
+          `\n🔗 Джерело: ${source}`;
+      }
+
+      text +=
+        `\n📊 Статус: new`;
+
+      text +=
+        `\n🕐 Час: ${new Date().toLocaleString("uk-UA")}`;
+
+      // ========================================
+      // 5. SEND TO TELEGRAM
+      // ========================================
 
       const telegramUrl =
         `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
 
-      // ------------------------------------------
-      // TELEGRAM API
-      // ------------------------------------------
+      const telegramResponse =
+        await fetch(
+          telegramUrl,
+          {
+            method: "POST",
 
-      const telegramResponse = await fetch(
-        telegramUrl,
-        {
-          method: "POST",
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
 
-          headers: {
-            "Content-Type": "application/json",
-          },
-
-          body: JSON.stringify({
-            chat_id: env.CHAT_ID,
-            text,
-          }),
-        }
-      );
+            body: JSON.stringify({
+              chat_id: env.CHAT_ID,
+              text,
+            }),
+          }
+        );
 
       let telegramData;
 
@@ -481,9 +641,9 @@ export default {
         );
       }
 
-      // ------------------------------------------
+      // ========================================
       // TELEGRAM ERROR
-      // ------------------------------------------
+      // ========================================
 
       if (
         !telegramResponse.ok ||
@@ -493,8 +653,9 @@ export default {
         return new Response(
           JSON.stringify({
             ok: false,
-            error: "Telegram API error",
-            telegram: telegramData,
+            requestId: requestCode,
+            error:
+              "Telegram API error",
           }),
           {
             status: 500,
@@ -503,15 +664,16 @@ export default {
         );
       }
 
-      // ------------------------------------------
+      // ========================================
       // SUCCESS
-      // ------------------------------------------
+      // ========================================
 
       return new Response(
         JSON.stringify({
           ok: true,
+          requestId: requestCode,
           message:
-            "Заявку успішно відправлено в Telegram",
+            "Заявку успішно збережено та відправлено в Telegram",
         }),
         {
           status: 200,
