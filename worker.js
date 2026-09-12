@@ -205,7 +205,9 @@ export default {
 
       // =========================================================
       // POST /request/:requestCode/status
-      // Зміна статусу + запис події
+      // Зміна статусу заявки
+      // + історія
+      // + синхронізація статусу об'єкта
       // =========================================================
 
       if (
@@ -243,7 +245,11 @@ export default {
         }
 
         const requestResult = await env.DB.prepare(`
-          SELECT id, request_code, status
+          SELECT
+            id,
+            request_code,
+            status,
+            object_id
           FROM requests
           WHERE request_code = ?
           LIMIT 1
@@ -264,6 +270,10 @@ export default {
 
         const oldStatus =
           currentRequest.status;
+
+        // ---------------------------------------------------------
+        // Оновлюємо статус заявки
+        // ---------------------------------------------------------
 
         const updateResult = await env.DB.prepare(`
           UPDATE requests
@@ -296,6 +306,10 @@ export default {
         const eventContent =
           `${oldStatusLabel} → ${newStatusLabel}`;
 
+        // ---------------------------------------------------------
+        // Записуємо історію зміни статусу заявки
+        // ---------------------------------------------------------
+
         const eventResult = await env.DB.prepare(`
           INSERT INTO events (
             object_id,
@@ -306,7 +320,7 @@ export default {
           )
           VALUES (?, ?, ?, ?, ?)
         `).bind(
-          null,
+          currentRequest.object_id || null,
           currentRequest.id,
           "status_changed",
           eventContent,
@@ -324,19 +338,111 @@ export default {
           }, cors, 500);
         }
 
+        // ---------------------------------------------------------
+        // Синхронізація статусу об'єкта
+        //
+        // Якщо заявка має об'єкт і статус не cancelled,
+        // статус об'єкта = статус заявки.
+        // ---------------------------------------------------------
+
+        let objectUpdated = false;
+        let object = null;
+
+        if (
+          currentRequest.object_id &&
+          newStatus !== "cancelled"
+        ) {
+          const objectUpdate = await env.DB.prepare(`
+            UPDATE objects
+            SET status = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `).bind(
+            newStatus,
+            currentRequest.object_id
+          ).run();
+
+          objectUpdated =
+            !objectUpdate.meta ||
+            objectUpdate.meta.changes >= 1;
+
+          // -------------------------------------------------------
+          // Окрема подія для об'єкта
+          // -------------------------------------------------------
+
+          if (objectUpdated) {
+            await env.DB.prepare(`
+              INSERT INTO events (
+                object_id,
+                request_id,
+                event_type,
+                content,
+                author_type
+              )
+              VALUES (?, ?, ?, ?, ?)
+            `).bind(
+              currentRequest.object_id,
+              currentRequest.id,
+              "object_status_changed",
+              `Статус об'єкта → ${newStatusLabel}`,
+              "system"
+            ).run();
+          }
+        }
+
+        // ---------------------------------------------------------
+        // Повертаємо результат
+        // ---------------------------------------------------------
+
+        if (currentRequest.object_id) {
+          const objectResult = await env.DB.prepare(`
+            SELECT
+              id,
+              object_code,
+              name,
+              status
+            FROM objects
+            WHERE id = ?
+            LIMIT 1
+          `).bind(
+            currentRequest.object_id
+          ).all();
+
+          object =
+            objectResult.results?.[0] || null;
+
+          if (object) {
+            object.status_label =
+              STATUS_LABELS[object.status] ||
+              object.status ||
+              "Невідомо";
+          }
+        }
+
         return json({
           ok: true,
+
           request: {
             id: currentRequest.id,
             request_code:
               currentRequest.request_code,
 
             old_status: oldStatus,
-            old_status_label: oldStatusLabel,
+            old_status_label:
+              oldStatusLabel,
 
             status: newStatus,
-            status_label: newStatusLabel
+            status_label:
+              newStatusLabel
           },
+
+          object: object
+            ? {
+                ...object,
+                updated:
+                  objectUpdated
+              }
+            : null,
 
           event: {
             event_type: "status_changed",
@@ -410,7 +516,8 @@ export default {
             id: currentRequest.id,
             request_code:
               currentRequest.request_code,
-            status: currentRequest.status,
+            status:
+              currentRequest.status,
             status_label:
               STATUS_LABELS[currentRequest.status] ||
               currentRequest.status ||
