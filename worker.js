@@ -1022,6 +1022,131 @@ export default {
 
 
       // =========================================================
+      // GET /object/:objectCode/file/:id
+      // Відкриття / перегляд файлу з R2
+      // =========================================================
+
+      if (
+        request.method === "GET" &&
+        path.startsWith("/object/") &&
+        path.includes("/file/")
+      ) {
+
+        if (!env.FILES) {
+          return json({
+            ok: false,
+            error:
+              "R2 binding FILES не підключений"
+          }, cors, 500);
+        }
+
+        const match =
+          path.match(
+            /^\/object\/(.+)\/file\/(\d+)\/?$/
+          );
+
+        if (!match) {
+          return json({
+            ok: false,
+            error: "Некоректний шлях до файлу"
+          }, cors, 400);
+        }
+
+        const objectCode =
+          decodeURIComponent(match[1]);
+
+        const fileId =
+          Number(match[2]);
+
+        if (!Number.isInteger(fileId) || fileId <= 0) {
+          return json({
+            ok: false,
+            error: "Некоректний ID файлу"
+          }, cors, 400);
+        }
+
+        const fileResult =
+          await env.DB.prepare(`
+            SELECT
+              f.id,
+              f.object_id,
+              f.name,
+              f.file_type,
+              f.storage_key,
+              o.object_code
+            FROM files f
+            INNER JOIN objects o
+              ON o.id = f.object_id
+            WHERE f.id = ?
+              AND o.object_code = ?
+            LIMIT 1
+          `).bind(
+            fileId,
+            objectCode
+          ).all();
+
+        if (
+          !fileResult.results ||
+          !fileResult.results.length
+        ) {
+          return json({
+            ok: false,
+            error: "Файл не знайдено"
+          }, cors, 404);
+        }
+
+        const file =
+          fileResult.results[0];
+
+        const storedObject =
+          await env.FILES.get(
+            file.storage_key
+          );
+
+        if (!storedObject) {
+          return json({
+            ok: false,
+            error:
+              "Файл є в базі, але відсутній у R2"
+          }, cors, 404);
+        }
+
+        const contentType =
+          storedObject.httpMetadata?.contentType ||
+          file.file_type ||
+          "application/octet-stream";
+
+        const encodedName =
+          encodeURIComponent(
+            file.name || "file"
+          );
+
+        return new Response(
+          storedObject.body,
+          {
+            status: 200,
+
+            headers: {
+              ...cors,
+
+              "Content-Type":
+                contentType,
+
+              "Content-Length":
+                String(storedObject.size),
+
+              "Content-Disposition":
+                `inline; filename*=UTF-8''${encodedName}`,
+
+              "Cache-Control":
+                "public, max-age=3600"
+            }
+          }
+        );
+      }
+
+
+      // =========================================================
       // PATCH /object/:objectCode
       // Оновлення даних об'єкта
       // =========================================================
