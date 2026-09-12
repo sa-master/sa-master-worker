@@ -725,11 +725,6 @@ export default {
           }, cors, 500);
         }
 
-
-        // -------------------------------------------------------
-        // Код об'єкта
-        // -------------------------------------------------------
-
         const objectCode =
           decodeURIComponent(
             path
@@ -737,11 +732,6 @@ export default {
               .replace("/file", "")
               .replace(/\/+$/, "")
           );
-
-
-        // -------------------------------------------------------
-        // Знаходимо об'єкт
-        // -------------------------------------------------------
 
         const objectResult =
           await env.DB.prepare(`
@@ -766,11 +756,6 @@ export default {
 
         const object =
           objectResult.results[0];
-
-
-        // -------------------------------------------------------
-        // Отримуємо multipart/form-data
-        // -------------------------------------------------------
 
         let formData;
 
@@ -800,11 +785,6 @@ export default {
           }, cors, 400);
         }
 
-
-        // -------------------------------------------------------
-        // Додаткові параметри
-        // -------------------------------------------------------
-
         const folderValue =
           String(
             formData.get("folder") ||
@@ -816,11 +796,6 @@ export default {
             formData.get("uploaded_by") ||
             "system"
           ).trim();
-
-
-        // -------------------------------------------------------
-        // Безпечна назва файлу
-        // -------------------------------------------------------
 
         const originalName =
           String(
@@ -835,21 +810,11 @@ export default {
             .slice(0, 180) ||
           "file";
 
-
-        // -------------------------------------------------------
-        // Унікальний ключ R2
-        // -------------------------------------------------------
-
         const timestamp =
           Date.now();
 
         const storageKey =
           `objects/${object.object_code}/${folderValue}/${timestamp}-${safeName}`;
-
-
-        // -------------------------------------------------------
-        // Запис файлу в R2
-        // -------------------------------------------------------
 
         const arrayBuffer =
           await file.arrayBuffer();
@@ -865,11 +830,6 @@ export default {
             }
           }
         );
-
-
-        // -------------------------------------------------------
-        // Версія файлу
-        // -------------------------------------------------------
 
         const versionResult =
           await env.DB.prepare(`
@@ -888,11 +848,6 @@ export default {
             versionResult.results?.[0]?.next_version ||
             1
           );
-
-
-        // -------------------------------------------------------
-        // Запис метаданих у D1
-        // -------------------------------------------------------
 
         const insertResult =
           await env.DB.prepare(`
@@ -917,9 +872,6 @@ export default {
 
         if (!insertResult.meta?.last_row_id) {
 
-          // Якщо D1 не записав метадані,
-          // прибираємо файл з R2, щоб не залишати сирітський файл.
-
           try {
             await env.FILES.delete(
               storageKey
@@ -938,11 +890,6 @@ export default {
           }, cors, 500);
         }
 
-
-        // -------------------------------------------------------
-        // Подія в історії об'єкта
-        // -------------------------------------------------------
-
         await env.DB.prepare(`
           INSERT INTO events (
             object_id,
@@ -959,11 +906,6 @@ export default {
           `Додано файл: ${originalName}`,
           "system"
         ).run();
-
-
-        // -------------------------------------------------------
-        // Результат
-        // -------------------------------------------------------
 
         return json({
           ok: true,
@@ -996,6 +938,85 @@ export default {
             size:
               file.size || arrayBuffer.byteLength
           }
+        }, cors);
+      }
+
+
+      // =========================================================
+      // GET /object/:objectCode/files
+      // Список файлів об'єкта з D1
+      // =========================================================
+
+      if (
+        request.method === "GET" &&
+        path.startsWith("/object/") &&
+        path.endsWith("/files")
+      ) {
+
+        const objectCode =
+          decodeURIComponent(
+            path
+              .replace("/object/", "")
+              .replace("/files", "")
+              .replace(/\/+$/, "")
+          );
+
+        const objectResult =
+          await env.DB.prepare(`
+            SELECT
+              id,
+              object_code,
+              name
+            FROM objects
+            WHERE object_code = ?
+            LIMIT 1
+          `).bind(objectCode).all();
+
+        if (
+          !objectResult.results ||
+          !objectResult.results.length
+        ) {
+          return json({
+            ok: false,
+            error: "Об'єкт не знайдено"
+          }, cors, 404);
+        }
+
+        const object =
+          objectResult.results[0];
+
+        const filesResult =
+          await env.DB.prepare(`
+            SELECT
+              id,
+              object_id,
+              name,
+              file_type,
+              storage_key,
+              version,
+              uploaded_by,
+              created_at
+            FROM files
+            WHERE object_id = ?
+            ORDER BY created_at DESC, id DESC
+          `).bind(object.id).all();
+
+        return json({
+          ok: true,
+
+          object: {
+            id:
+              object.id,
+
+            object_code:
+              object.object_code,
+
+            name:
+              object.name
+          },
+
+          files:
+            filesResult.results || []
         }, cors);
       }
 
@@ -1039,11 +1060,6 @@ export default {
           }, cors, 400);
         }
 
-
-        // -------------------------------------------------------
-        // Знаходимо об'єкт
-        // -------------------------------------------------------
-
         const objectResult =
           await env.DB.prepare(`
             SELECT *
@@ -1064,11 +1080,6 @@ export default {
 
         const currentObject =
           objectResult.results[0];
-
-
-        // -------------------------------------------------------
-        // Дозволені поля
-        // -------------------------------------------------------
 
         const fields = [];
         const values = [];
@@ -1217,11 +1228,6 @@ export default {
           }, cors, 400);
         }
 
-
-        // -------------------------------------------------------
-        // Оновлюємо об'єкт
-        // -------------------------------------------------------
-
         fields.push(
           "updated_at = CURRENT_TIMESTAMP"
         );
@@ -1246,11 +1252,6 @@ export default {
           }, cors, 500);
         }
 
-
-        // -------------------------------------------------------
-        // Історія зміни об'єкта
-        // -------------------------------------------------------
-
         await env.DB.prepare(`
           INSERT INTO events (
             object_id,
@@ -1267,11 +1268,6 @@ export default {
           `Оновлено: ${changedFields.join(", ")}`,
           "system"
         ).run();
-
-
-        // -------------------------------------------------------
-        // Повертаємо оновлений об'єкт
-        // -------------------------------------------------------
 
         const updatedResult =
           await env.DB.prepare(`
@@ -1327,11 +1323,6 @@ export default {
               .replace(/\/+$/, "")
           );
 
-
-        // -------------------------------------------------------
-        // Об'єкт + клієнт
-        // -------------------------------------------------------
-
         const objectResult =
           await env.DB.prepare(`
             SELECT
@@ -1358,11 +1349,6 @@ export default {
 
         const objectData =
           objectResult.results[0];
-
-
-        // -------------------------------------------------------
-        // Заявки об'єкта
-        // -------------------------------------------------------
 
         const requestsResult =
           await env.DB.prepare(`
@@ -1396,11 +1382,6 @@ export default {
               "Невідомо"
           }));
 
-
-        // -------------------------------------------------------
-        // Події об'єкта
-        // -------------------------------------------------------
-
         const eventsResult =
           await env.DB.prepare(`
             SELECT
@@ -1419,7 +1400,6 @@ export default {
 
         const events =
           eventsResult.results || [];
-
 
         return json({
           ok: true,
@@ -1503,7 +1483,6 @@ export default {
             "SA-MASTER.PRO"
           ).trim();
 
-
         if (!name || !phone || !type) {
           return json({
             ok: false,
@@ -1511,11 +1490,6 @@ export default {
               "Необхідні ім'я, телефон та тип заявки"
           }, cors, 400);
         }
-
-
-        // -------------------------------------------------------
-        // Код заявки
-        // -------------------------------------------------------
 
         const countResult =
           await env.DB.prepare(`
@@ -1531,11 +1505,6 @@ export default {
 
         const requestCode =
           `SM-R-2026-${String(count).padStart(3, "0")}`;
-
-
-        // -------------------------------------------------------
-        // Створення заявки
-        // -------------------------------------------------------
 
         const insertResult =
           await env.DB.prepare(`
@@ -1576,11 +1545,6 @@ export default {
 
         const requestId =
           insertResult.meta.last_row_id;
-
-
-        // -------------------------------------------------------
-        // Пошук / створення клієнта
-        // -------------------------------------------------------
 
         const normalizedPhone =
           normalizePhone(phone);
@@ -1635,11 +1599,6 @@ export default {
           }
         }
 
-
-        // -------------------------------------------------------
-        // Прив'язка клієнта
-        // -------------------------------------------------------
-
         if (client) {
 
           await env.DB.prepare(`
@@ -1652,11 +1611,6 @@ export default {
             requestId
           ).run();
         }
-
-
-        // -------------------------------------------------------
-        // Перша подія
-        // -------------------------------------------------------
 
         await env.DB.prepare(`
           INSERT INTO events (
@@ -1674,11 +1628,6 @@ export default {
           "Створено заявку",
           "system"
         ).run();
-
-
-        // -------------------------------------------------------
-        // Telegram
-        // -------------------------------------------------------
 
         const telegramText = [
           "🏠 НОВА ЗАЯВКА",
@@ -1699,7 +1648,6 @@ export default {
             }
           )}`
         ].join("\n");
-
 
         if (
           env.BOT_TOKEN &&
@@ -1736,7 +1684,6 @@ export default {
             );
           }
         }
-
 
         return json({
           ok: true,
