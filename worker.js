@@ -78,7 +78,10 @@ export default {
 
       // =========================================================
       // POST /request/:requestCode/client
-      // Create/find client from request
+      // Create/find client from request manually
+      //
+      // This route is kept for existing requests and diagnostics.
+      // New requests now attach clients automatically.
       //
       // IMPORTANT:
       // This route MUST be before GET /request/:requestCode
@@ -856,7 +859,6 @@ export default {
             },
             400
           );
-        }
 
 
         // -------------------------------------------------------
@@ -966,6 +968,135 @@ export default {
         `)
           .bind(
             requestCode,
+            requestDbId
+          )
+          .run();
+
+
+        // =======================================================
+        // AUTO CREATE / FIND CLIENT
+        // =======================================================
+
+        const normalizedPhone =
+          phone
+            .replace(/[^\d+]/g, "")
+            .trim();
+
+
+        if (!normalizedPhone) {
+          return json(
+            {
+              ok: false,
+              error:
+                "Phone is invalid",
+              requestId:
+                requestCode,
+            },
+            400
+          );
+        }
+
+
+        // -------------------------------------------------------
+        // Find existing client by phone
+        // -------------------------------------------------------
+
+        const clientResult =
+          await env.DB.prepare(`
+            SELECT
+              id,
+              name,
+              phone,
+              telegram_id,
+              created_at
+            FROM clients
+            WHERE phone = ?
+            LIMIT 1
+          `)
+            .bind(normalizedPhone)
+            .all();
+
+
+        let client;
+        let clientCreated = false;
+
+
+        // -------------------------------------------------------
+        // Existing client
+        // -------------------------------------------------------
+
+        if (
+          clientResult.results &&
+          clientResult.results.length
+        ) {
+
+          client =
+            clientResult.results[0];
+
+        } else {
+
+          // -----------------------------------------------------
+          // Create new client
+          // -----------------------------------------------------
+
+          const insertClient =
+            await env.DB.prepare(`
+              INSERT INTO clients (
+                name,
+                phone
+              )
+              VALUES (?, ?)
+              RETURNING
+                id,
+                name,
+                phone,
+                telegram_id,
+                created_at
+            `)
+              .bind(
+                name,
+                normalizedPhone
+              )
+              .all();
+
+
+          if (
+            !insertClient.results ||
+            !insertClient.results.length
+          ) {
+            return json(
+              {
+                ok: false,
+                error:
+                  "Request created but client creation failed",
+                requestId:
+                  requestCode,
+              },
+              500
+            );
+          }
+
+
+          client =
+            insertClient.results[0];
+
+          clientCreated = true;
+        }
+
+
+        // -------------------------------------------------------
+        // Attach client to request
+        // -------------------------------------------------------
+
+        await env.DB.prepare(`
+          UPDATE requests
+          SET
+            client_id = ?,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+        `)
+          .bind(
+            client.id,
             requestDbId
           )
           .run();
@@ -1107,6 +1238,10 @@ export default {
             requestCode,
           request:
             savedRequest,
+          client: {
+            id: client.id,
+            created: clientCreated,
+          },
         });
       }
 
