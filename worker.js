@@ -14,6 +14,7 @@ export default {
     const path = url.pathname;
 
     try {
+
       // =========================================================
       // GET /
       // Diagnostics
@@ -76,73 +77,11 @@ export default {
 
 
       // =========================================================
-      // GET /request/:requestCode
-      // Get one request
-      // =========================================================
-
-      if (
-        request.method === "GET" &&
-        path.startsWith("/request/")
-      ) {
-        const requestCode = decodeURIComponent(
-          path.replace("/request/", "")
-        );
-
-        if (!requestCode) {
-          return json(
-            {
-              ok: false,
-              error: "Request code missing",
-            },
-            400
-          );
-        }
-
-        const result = await env.DB.prepare(`
-          SELECT
-            id,
-            request_code,
-            client_id,
-            object_id,
-            type,
-            type_label,
-            name,
-            phone,
-            location,
-            timing,
-            project,
-            consultation_date,
-            source,
-            status,
-            created_at,
-            updated_at
-          FROM requests
-          WHERE request_code = ?
-          LIMIT 1
-        `)
-          .bind(requestCode)
-          .all();
-
-        if (!result.results || !result.results.length) {
-          return json(
-            {
-              ok: false,
-              error: "Request not found",
-            },
-            404
-          );
-        }
-
-        return json({
-          ok: true,
-          request: result.results[0],
-        });
-      }
-
-
-      // =========================================================
       // POST /request/:requestCode/client
       // Create/find client from request
+      //
+      // IMPORTANT:
+      // This route MUST be before GET /request/:requestCode
       // =========================================================
 
       if (
@@ -150,10 +89,12 @@ export default {
         path.startsWith("/request/") &&
         path.endsWith("/client")
       ) {
+
         const requestCode = decodeURIComponent(
           path
             .replace("/request/", "")
             .replace("/client", "")
+            .replace(/\/+$/, "")
         );
 
         if (!requestCode) {
@@ -166,8 +107,9 @@ export default {
           );
         }
 
+
         // -------------------------------------------------------
-        // 1. Get request
+        // 1. Find request
         // -------------------------------------------------------
 
         const requestResult = await env.DB.prepare(`
@@ -203,6 +145,7 @@ export default {
             {
               ok: false,
               error: "Request not found",
+              requestCode,
             },
             404
           );
@@ -212,23 +155,25 @@ export default {
 
 
         // -------------------------------------------------------
-        // 2. If request already has client_id
+        // 2. Request already has client
         // -------------------------------------------------------
 
         if (req.client_id) {
-          const existingClient = await env.DB.prepare(`
-            SELECT
-              id,
-              name,
-              phone,
-              telegram_id,
-              created_at
-            FROM clients
-            WHERE id = ?
-            LIMIT 1
-          `)
-            .bind(req.client_id)
-            .all();
+
+          const existingClient =
+            await env.DB.prepare(`
+              SELECT
+                id,
+                name,
+                phone,
+                telegram_id,
+                created_at
+              FROM clients
+              WHERE id = ?
+              LIMIT 1
+            `)
+              .bind(req.client_id)
+              .all();
 
           if (
             existingClient.results &&
@@ -249,9 +194,10 @@ export default {
         // 3. Normalize phone
         // -------------------------------------------------------
 
-        const normalizedPhone = String(req.phone || "")
-          .replace(/[^\d+]/g, "")
-          .trim();
+        const normalizedPhone =
+          String(req.phone || "")
+            .replace(/[^\d+]/g, "")
+            .trim();
 
         if (!normalizedPhone) {
           return json(
@@ -265,57 +211,67 @@ export default {
 
 
         // -------------------------------------------------------
-        // 4. Search existing client by phone
+        // 4. Find existing client by phone
         // -------------------------------------------------------
 
-        let clientResult = await env.DB.prepare(`
-          SELECT
-            id,
-            name,
-            phone,
-            telegram_id,
-            created_at
-          FROM clients
-          WHERE phone = ?
-          LIMIT 1
-        `)
-          .bind(normalizedPhone)
-          .all();
-
-
-        // -------------------------------------------------------
-        // 5. Create client if not found
-        // -------------------------------------------------------
-
-        let client;
-        let created = false;
-        let existing = false;
-
-        if (
-          clientResult.results &&
-          clientResult.results.length
-        ) {
-          client = clientResult.results[0];
-          existing = true;
-        } else {
-          const insertClient = await env.DB.prepare(`
-            INSERT INTO clients (
-              name,
-              phone
-            )
-            VALUES (?, ?)
-            RETURNING
+        const clientResult =
+          await env.DB.prepare(`
+            SELECT
               id,
               name,
               phone,
               telegram_id,
               created_at
+            FROM clients
+            WHERE phone = ?
+            LIMIT 1
           `)
-            .bind(
-              req.name,
-              normalizedPhone
-            )
+            .bind(normalizedPhone)
             .all();
+
+
+        let client;
+        let created = false;
+        let existing = false;
+
+
+        // -------------------------------------------------------
+        // 5. Existing client
+        // -------------------------------------------------------
+
+        if (
+          clientResult.results &&
+          clientResult.results.length
+        ) {
+
+          client = clientResult.results[0];
+          existing = true;
+
+        } else {
+
+          // -----------------------------------------------------
+          // 6. Create new client
+          // -----------------------------------------------------
+
+          const insertClient =
+            await env.DB.prepare(`
+              INSERT INTO clients (
+                name,
+                phone
+              )
+              VALUES (?, ?)
+              RETURNING
+                id,
+                name,
+                phone,
+                telegram_id,
+                created_at
+            `)
+              .bind(
+                req.name,
+                normalizedPhone
+              )
+              .all();
 
           if (
             !insertClient.results ||
@@ -330,13 +286,15 @@ export default {
             );
           }
 
-          client = insertClient.results[0];
+          client =
+            insertClient.results[0];
+
           created = true;
         }
 
 
         // -------------------------------------------------------
-        // 6. Attach client to request
+        // 7. Attach client to request
         // -------------------------------------------------------
 
         await env.DB.prepare(`
@@ -354,33 +312,34 @@ export default {
 
 
         // -------------------------------------------------------
-        // 7. Get updated request
+        // 8. Get updated request
         // -------------------------------------------------------
 
-        const updatedRequestResult = await env.DB.prepare(`
-          SELECT
-            id,
-            request_code,
-            client_id,
-            object_id,
-            type,
-            type_label,
-            name,
-            phone,
-            location,
-            timing,
-            project,
-            consultation_date,
-            source,
-            status,
-            created_at,
-            updated_at
-          FROM requests
-          WHERE id = ?
-          LIMIT 1
-        `)
-          .bind(req.id)
-          .all();
+        const updatedRequestResult =
+          await env.DB.prepare(`
+            SELECT
+              id,
+              request_code,
+              client_id,
+              object_id,
+              type,
+              type_label,
+              name,
+              phone,
+              location,
+              timing,
+              project,
+              consultation_date,
+              source,
+              status,
+              created_at,
+              updated_at
+            FROM requests
+            WHERE id = ?
+            LIMIT 1
+          `)
+            .bind(req.id)
+            .all();
 
         const updatedRequest =
           updatedRequestResult.results &&
@@ -390,7 +349,7 @@ export default {
 
 
         // -------------------------------------------------------
-        // 8. Response
+        // 9. Return result
         // -------------------------------------------------------
 
         return json({
@@ -404,6 +363,82 @@ export default {
 
 
       // =========================================================
+      // GET /request/:requestCode
+      // Get one request
+      // =========================================================
+
+      if (
+        request.method === "GET" &&
+        path.startsWith("/request/")
+      ) {
+
+        const requestCode =
+          decodeURIComponent(
+            path
+              .replace("/request/", "")
+              .replace(/\/+$/, "")
+          );
+
+        if (!requestCode) {
+          return json(
+            {
+              ok: false,
+              error: "Request code missing",
+            },
+            400
+          );
+        }
+
+
+        const result =
+          await env.DB.prepare(`
+            SELECT
+              id,
+              request_code,
+              client_id,
+              object_id,
+              type,
+              type_label,
+              name,
+              phone,
+              location,
+              timing,
+              project,
+              consultation_date,
+              source,
+              status,
+              created_at,
+              updated_at
+            FROM requests
+            WHERE request_code = ?
+            LIMIT 1
+          `)
+            .bind(requestCode)
+            .all();
+
+
+        if (
+          !result.results ||
+          !result.results.length
+        ) {
+          return json(
+            {
+              ok: false,
+              error: "Request not found",
+            },
+            404
+          );
+        }
+
+
+        return json({
+          ok: true,
+          request: result.results[0],
+        });
+      }
+
+
+      // =========================================================
       // GET /object/:objectCode
       // Get object with related data
       // =========================================================
@@ -412,9 +447,13 @@ export default {
         request.method === "GET" &&
         path.startsWith("/object/")
       ) {
-        const objectCode = decodeURIComponent(
-          path.replace("/object/", "")
-        );
+
+        const objectCode =
+          decodeURIComponent(
+            path
+              .replace("/object/", "")
+              .replace(/\/+$/, "")
+          );
 
         if (!objectCode) {
           return json(
@@ -426,24 +465,31 @@ export default {
           );
         }
 
-        const objectResult = await env.DB.prepare(`
-          SELECT
-            id,
-            object_code,
-            client_id,
-            name,
-            address,
-            work_type,
-            status,
-            planned_start_date,
-            created_at,
-            updated_at
-          FROM objects
-          WHERE object_code = ?
-          LIMIT 1
-        `)
-          .bind(objectCode)
-          .all();
+
+        // -------------------------------------------------------
+        // Object
+        // -------------------------------------------------------
+
+        const objectResult =
+          await env.DB.prepare(`
+            SELECT
+              id,
+              object_code,
+              client_id,
+              name,
+              address,
+              work_type,
+              status,
+              planned_start_date,
+              created_at,
+              updated_at
+            FROM objects
+            WHERE object_code = ?
+            LIMIT 1
+          `)
+            .bind(objectCode)
+            .all();
+
 
         if (
           !objectResult.results ||
@@ -458,48 +504,53 @@ export default {
           );
         }
 
-        const object = objectResult.results[0];
+
+        const object =
+          objectResult.results[0];
 
 
         // -------------------------------------------------------
         // Client
         // -------------------------------------------------------
 
-        const clientResult = await env.DB.prepare(`
-          SELECT
-            id,
-            name,
-            phone,
-            telegram_id,
-            created_at
-          FROM clients
-          WHERE id = ?
-          LIMIT 1
-        `)
-          .bind(object.client_id)
-          .all();
+        const clientResult =
+          await env.DB.prepare(`
+            SELECT
+              id,
+              name,
+              phone,
+              telegram_id,
+              created_at
+            FROM clients
+            WHERE id = ?
+            LIMIT 1
+          `)
+            .bind(object.client_id)
+            .all();
 
 
         // -------------------------------------------------------
         // Estimates
         // -------------------------------------------------------
 
-        const estimatesResult = await env.DB.prepare(`
-          SELECT
-            id,
-            object_id,
-            title,
-            status,
-            created_at,
-            updated_at
-          FROM estimates
-          WHERE object_id = ?
-          ORDER BY id DESC
-        `)
-          .bind(object.id)
-          .all();
+        const estimatesResult =
+          await env.DB.prepare(`
+            SELECT
+              id,
+              object_id,
+              title,
+              status,
+              created_at,
+              updated_at
+            FROM estimates
+            WHERE object_id = ?
+            ORDER BY id DESC
+          `)
+            .bind(object.id)
+            .all();
 
-        const estimates = estimatesResult.results || [];
+        const estimates =
+          estimatesResult.results || [];
 
 
         // -------------------------------------------------------
@@ -509,29 +560,34 @@ export default {
         let estimateItems = [];
 
         if (estimates.length) {
-          const ids = estimates.map(e => e.id);
 
-          const placeholders = ids
-            .map(() => "?")
-            .join(",");
+          const ids =
+            estimates.map(
+              estimate => estimate.id
+            );
 
-          const itemsResult = await env.DB.prepare(`
-            SELECT
-              id,
-              estimate_id,
-              description,
-              quantity,
-              unit_price,
-              total,
-              created_at
-            FROM estimate_items
-            WHERE estimate_id IN (${placeholders})
-            ORDER BY id ASC
-          `)
-            .bind(...ids)
-            .all();
+          const placeholders =
+            ids.map(() => "?").join(",");
 
-          estimateItems = itemsResult.results || [];
+          const itemsResult =
+            await env.DB.prepare(`
+              SELECT
+                id,
+                estimate_id,
+                description,
+                quantity,
+                unit_price,
+                total,
+                created_at
+              FROM estimate_items
+              WHERE estimate_id IN (${placeholders})
+              ORDER BY id ASC
+            `)
+              .bind(...ids)
+              .all();
+
+          estimateItems =
+            itemsResult.results || [];
         }
 
 
@@ -539,38 +595,42 @@ export default {
         // Payments
         // -------------------------------------------------------
 
-        const paymentsResult = await env.DB.prepare(`
-          SELECT
-            id,
-            object_id,
-            type,
-            amount,
-            description,
-            created_at
-          FROM payments
-          WHERE object_id = ?
-          ORDER BY id DESC
-        `)
-          .bind(object.id)
-          .all();
+        const paymentsResult =
+          await env.DB.prepare(`
+            SELECT
+              id,
+              object_id,
+              type,
+              amount,
+              description,
+              created_at
+            FROM payments
+            WHERE object_id = ?
+            ORDER BY id DESC
+          `)
+            .bind(object.id)
+            .all();
 
-        const payments = paymentsResult.results || [];
+        const payments =
+          paymentsResult.results || [];
 
 
         // -------------------------------------------------------
-        // Financial summary
+        // Financial
         // -------------------------------------------------------
 
         let totalEstimate = 0;
 
         for (const item of estimateItems) {
-          totalEstimate += Number(item.total || 0);
+          totalEstimate +=
+            Number(item.total || 0);
         }
 
         let totalPayments = 0;
 
         for (const payment of payments) {
-          totalPayments += Number(payment.amount || 0);
+          totalPayments +=
+            Number(payment.amount || 0);
         }
 
         const balance =
@@ -581,64 +641,67 @@ export default {
         // Events
         // -------------------------------------------------------
 
-        const eventsResult = await env.DB.prepare(`
-          SELECT
-            id,
-            object_id,
-            event_type,
-            content,
-            author_type,
-            author_id,
-            created_at
-          FROM events
-          WHERE object_id = ?
-          ORDER BY id DESC
-        `)
-          .bind(object.id)
-          .all();
+        const eventsResult =
+          await env.DB.prepare(`
+            SELECT
+              id,
+              object_id,
+              event_type,
+              content,
+              author_type,
+              author_id,
+              created_at
+            FROM events
+            WHERE object_id = ?
+            ORDER BY id DESC
+          `)
+            .bind(object.id)
+            .all();
 
 
         // -------------------------------------------------------
         // Important
         // -------------------------------------------------------
 
-        const importantResult = await env.DB.prepare(`
-          SELECT
-            id,
-            object_id,
-            title,
-            content,
-            file_id,
-            created_at,
-            created_by
-          FROM important
-          WHERE object_id = ?
-          ORDER BY id DESC
-        `)
-          .bind(object.id)
-          .all();
+        const importantResult =
+          await env.DB.prepare(`
+            SELECT
+              id,
+              object_id,
+              title,
+              content,
+              file_id,
+              created_at,
+              created_by
+            FROM important
+            WHERE object_id = ?
+            ORDER BY id DESC
+          `)
+            .bind(object.id)
+            .all();
 
 
         // -------------------------------------------------------
         // Files
         // -------------------------------------------------------
 
-        const filesResult = await env.DB.prepare(`
-          SELECT
-            id,
-            object_id,
-            name,
-            file_type,
-            storage_key,
-            version,
-            uploaded_by,
-            created_at
-          FROM files
-          WHERE object_id = ?
-          ORDER BY id DESC
-        `)
-          .bind(object.id)
-          .all();
+        const filesResult =
+          await env.DB.prepare(`
+            SELECT
+              id,
+              object_id,
+              name,
+              file_type,
+              storage_key,
+              version,
+              uploaded_by,
+              created_at
+            FROM files
+            WHERE object_id = ?
+            ORDER BY id DESC
+          `)
+            .bind(object.id)
+            .all();
 
 
         return json({
@@ -654,21 +717,29 @@ export default {
 
           estimates,
 
-          estimate_items: estimateItems,
+          estimate_items:
+            estimateItems,
 
           payments,
 
           financial: {
-            total_estimate: totalEstimate,
-            total_payments: totalPayments,
+            total_estimate:
+              totalEstimate,
+
+            total_payments:
+              totalPayments,
+
             balance,
           },
 
-          events: eventsResult.results || [],
+          events:
+            eventsResult.results || [],
 
-          important: importantResult.results || [],
+          important:
+            importantResult.results || [],
 
-          files: filesResult.results || [],
+          files:
+            filesResult.results || [],
         });
       }
 
@@ -682,6 +753,7 @@ export default {
         request.method === "POST" &&
         path === "/"
       ) {
+
         if (!env.DB) {
           return json(
             {
@@ -714,15 +786,12 @@ export default {
 
 
         // -------------------------------------------------------
-        // Read body
+        // Body
         // -------------------------------------------------------
 
-        const body = await request.json();
+        const body =
+          await request.json();
 
-
-        // -------------------------------------------------------
-        // Data
-        // -------------------------------------------------------
 
         const name =
           String(body.name || "").trim();
@@ -734,23 +803,34 @@ export default {
           String(body.type || "").trim();
 
         const typeLabel =
-          String(body.typeLabel || "").trim();
+          String(
+            body.typeLabel || ""
+          ).trim();
 
         const location =
-          String(body.location || "").trim();
+          String(
+            body.location || ""
+          ).trim();
 
         const timing =
-          String(body.timing || "").trim();
+          String(
+            body.timing || ""
+          ).trim();
 
         const project =
-          String(body.project || "").trim();
+          String(
+            body.project || ""
+          ).trim();
 
         const consultationDate =
-          String(body.consultationDate || "").trim();
+          String(
+            body.consultationDate || ""
+          ).trim();
 
         const source =
           String(
-            body.source || "SA-MASTER.PRO"
+            body.source ||
+            "SA-MASTER.PRO"
           ).trim();
 
 
@@ -780,15 +860,23 @@ export default {
 
 
         // -------------------------------------------------------
-        // Type labels fallback
+        // Type labels
         // -------------------------------------------------------
 
         const labels = {
-          complex: "Комплексний монтаж",
-          local: "Локальний монтаж",
-          consultation: "Консультація",
-          estimate: "Прорахунок",
+          complex:
+            "Комплексний монтаж",
+
+          local:
+            "Локальний монтаж",
+
+          consultation:
+            "Консультація",
+
+          estimate:
+            "Прорахунок",
         };
+
 
         const finalTypeLabel =
           typeLabel ||
@@ -801,34 +889,37 @@ export default {
         // Insert request
         // -------------------------------------------------------
 
-        const insertResult = await env.DB.prepare(`
-          INSERT INTO requests (
-            type,
-            type_label,
-            name,
-            phone,
-            location,
-            timing,
-            project,
-            consultation_date,
-            source,
-            status
-          )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')
-          RETURNING id
-        `)
-          .bind(
-            type,
-            finalTypeLabel,
-            name,
-            phone,
-            location || null,
-            timing || null,
-            project || null,
-            consultationDate || null,
-            source || "SA-MASTER.PRO"
-          )
-          .all();
+        const insertResult =
+          await env.DB.prepare(`
+            INSERT INTO requests (
+              type,
+              type_label,
+              name,
+              phone,
+              location,
+              timing,
+              project,
+              consultation_date,
+              source,
+              status
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'new')
+            RETURNING id
+          `)
+            .bind(
+              type,
+              finalTypeLabel,
+              name,
+              phone,
+              location || null,
+              timing || null,
+              project || null,
+              consultationDate || null,
+              source ||
+                "SA-MASTER.PRO"
+            )
+            .all();
+
 
         if (
           !insertResult.results ||
@@ -837,25 +928,29 @@ export default {
           return json(
             {
               ok: false,
-              error: "Failed to create request",
+              error:
+                "Failed to create request",
             },
             500
           );
         }
+
 
         const requestDbId =
           insertResult.results[0].id;
 
 
         // -------------------------------------------------------
-        // Generate request code
+        // Request code
         // -------------------------------------------------------
 
         const year =
           new Date().getFullYear();
 
         const requestCode =
-          `SM-R-${year}-${String(requestDbId).padStart(3, "0")}`;
+          `SM-R-${year}-${String(
+            requestDbId
+          ).padStart(3, "0")}`;
 
 
         // -------------------------------------------------------
@@ -877,33 +972,35 @@ export default {
 
 
         // -------------------------------------------------------
-        // Get created request
+        // Get saved request
         // -------------------------------------------------------
 
-        const requestResult = await env.DB.prepare(`
-          SELECT
-            id,
-            request_code,
-            client_id,
-            object_id,
-            type,
-            type_label,
-            name,
-            phone,
-            location,
-            timing,
-            project,
-            consultation_date,
-            source,
-            status,
-            created_at,
-            updated_at
-          FROM requests
-          WHERE id = ?
-          LIMIT 1
-        `)
-          .bind(requestDbId)
-          .all();
+        const requestResult =
+          await env.DB.prepare(`
+            SELECT
+              id,
+              request_code,
+              client_id,
+              object_id,
+              type,
+              type_label,
+              name,
+              phone,
+              location,
+              timing,
+              project,
+              consultation_date,
+              source,
+              status,
+              created_at,
+              updated_at
+            FROM requests
+            WHERE id = ?
+            LIMIT 1
+          `)
+            .bind(requestDbId)
+            .all();
+
 
         const savedRequest =
           requestResult.results &&
@@ -913,17 +1010,19 @@ export default {
 
 
         // -------------------------------------------------------
-        // Telegram message
+        // Telegram
         // -------------------------------------------------------
 
         const now =
           new Date().toLocaleString(
             "uk-UA",
             {
-              timeZone: "Europe/Kyiv",
+              timeZone:
+                "Europe/Kyiv",
               hour12: false,
             }
           );
+
 
         const telegramText = `
 🏠 НОВА ЗАЯВКА
@@ -946,7 +1045,7 @@ export default {
 
 
         // -------------------------------------------------------
-        // Send Telegram
+        // Telegram API
         // -------------------------------------------------------
 
         const telegramResponse =
@@ -961,8 +1060,11 @@ export default {
               },
 
               body: JSON.stringify({
-                chat_id: env.CHAT_ID,
-                text: telegramText,
+                chat_id:
+                  env.CHAT_ID,
+
+                text:
+                  telegramText,
               }),
             }
           );
@@ -972,7 +1074,11 @@ export default {
           await telegramResponse.json();
 
 
-        if (!telegramResponse.ok || !telegramData.ok) {
+        if (
+          !telegramResponse.ok ||
+          !telegramData.ok
+        ) {
+
           console.error(
             "Telegram error:",
             telegramData
@@ -981,8 +1087,10 @@ export default {
           return json(
             {
               ok: false,
-              error: "Request saved but Telegram notification failed",
-              requestId: requestCode,
+              error:
+                "Request saved but Telegram notification failed",
+              requestId:
+                requestCode,
             },
             500
           );
@@ -995,8 +1103,10 @@ export default {
 
         return json({
           ok: true,
-          requestId: requestCode,
-          request: savedRequest,
+          requestId:
+            requestCode,
+          request:
+            savedRequest,
         });
       }
 
@@ -1013,7 +1123,9 @@ export default {
         404
       );
 
+
     } catch (error) {
+
       console.error(error);
 
       return json(
@@ -1032,7 +1144,10 @@ export default {
     // JSON helper
     // =========================================================
 
-    function json(data, status = 200) {
+    function json(
+      data,
+      status = 200
+    ) {
       return new Response(
         JSON.stringify(data),
         {
@@ -1040,6 +1155,7 @@ export default {
 
           headers: {
             ...cors,
+
             "Content-Type":
               "application/json; charset=utf-8",
           },
