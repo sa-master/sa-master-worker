@@ -30,6 +30,107 @@ export default {
     const url = new URL(request.url);
 
     // ==========================================
+    // GET /request/:requestCode
+    // ==========================================
+
+    if (
+      request.method === "GET" &&
+      url.pathname.startsWith("/request/")
+    ) {
+      try {
+
+        if (!env.DB) {
+          throw new Error("DB binding is NOT available");
+        }
+
+        const requestCode = decodeURIComponent(
+          url.pathname.replace("/request/", "")
+        ).trim();
+
+        if (!requestCode) {
+          throw new Error("Request code is missing");
+        }
+
+        const requestResult = await env.DB
+          .prepare(`
+            SELECT
+              r.id,
+              r.request_code,
+              r.client_id,
+              r.object_id,
+
+              r.type,
+              r.type_label,
+
+              r.name,
+              r.phone,
+              r.location,
+
+              r.timing,
+              r.project,
+              r.consultation_date,
+
+              r.source,
+              r.status,
+
+              r.created_at,
+              r.updated_at
+
+            FROM requests r
+
+            WHERE r.request_code = ?
+
+            LIMIT 1
+          `)
+          .bind(requestCode)
+          .first();
+
+        if (!requestResult) {
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              error: "Request not found",
+            }),
+            {
+              status: 404,
+              headers: jsonHeaders,
+            }
+          );
+        }
+
+        // ========================================
+        // RESPONSE
+        // ========================================
+
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            request: requestResult,
+          }),
+          {
+            status: 200,
+            headers: jsonHeaders,
+          }
+        );
+
+      } catch (error) {
+
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error:
+              error?.message ||
+              "Unknown D1 error",
+          }),
+          {
+            status: 500,
+            headers: jsonHeaders,
+          }
+        );
+      }
+    }
+
+    // ==========================================
     // GET /object/:objectCode
     // ==========================================
 
@@ -440,9 +541,9 @@ export default {
       const consultationDate =
         clean(data.consultationDate);
 
-      // На цьому етапі джерело за замовчуванням —
-      // сам сайт. Надалі тут можна буде використовувати
-      // UTM / QR / NFC / Instagram / Facebook тощо.
+      // ========================================
+      // SOURCE
+      // ========================================
 
       const source =
         clean(data.source) ||
