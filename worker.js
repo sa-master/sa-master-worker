@@ -7,7 +7,6 @@ export default {
       "Access-Control-Allow-Headers": "Content-Type",
     };
 
-    // CORS
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -15,17 +14,282 @@ export default {
       });
     }
 
-    // --------------------------------------------------
-    // DIAGNOSTIC GET
-    // --------------------------------------------------
-    // Відкриття Worker у браузері покаже,
-    // чи доступні Secrets. Значення секретів не показуються.
+    const url = new URL(request.url);
+
+    // ==========================================
+    // GET /object/SM-2026-001
+    // Отримання даних об'єкта з D1
+    // ==========================================
+
+    if (
+      request.method === "GET" &&
+      url.pathname.startsWith("/object/")
+    ) {
+      try {
+        if (!env.DB) {
+          throw new Error("DB binding is NOT available");
+        }
+
+        const objectCode = decodeURIComponent(
+          url.pathname.replace("/object/", "")
+        );
+
+        if (!objectCode) {
+          throw new Error("Object code is missing");
+        }
+
+        // Об'єкт + клієнт
+        const objectResult = await env.DB
+          .prepare(`
+            SELECT
+              o.id,
+              o.object_code,
+              o.name,
+              o.address,
+              o.work_type,
+              o.status,
+              o.planned_start_date,
+              o.created_at,
+              o.updated_at,
+
+              c.id AS client_id,
+              c.name AS client_name,
+              c.phone AS client_phone,
+              c.telegram_id AS client_telegram_id
+
+            FROM objects o
+
+            JOIN clients c
+              ON c.id = o.client_id
+
+            WHERE o.object_code = ?
+            LIMIT 1
+          `)
+          .bind(objectCode)
+          .first();
+
+        if (!objectResult) {
+          return new Response(
+            JSON.stringify({
+              ok: false,
+              error: "Object not found",
+            }),
+            {
+              status: 404,
+              headers: {
+                ...cors,
+                "Content-Type": "application/json",
+              },
+            }
+          );
+        }
+
+        const objectId = objectResult.id;
+
+        // Кошториси
+        const estimatesResult = await env.DB
+          .prepare(`
+            SELECT
+              id,
+              title,
+              status,
+              created_at,
+              updated_at
+            FROM estimates
+            WHERE object_id = ?
+            ORDER BY id DESC
+          `)
+          .bind(objectId)
+          .all();
+
+        // Позиції кошторису
+        const estimateItemsResult = await env.DB
+          .prepare(`
+            SELECT
+              ei.id,
+              ei.estimate_id,
+              ei.description,
+              ei.quantity,
+              ei.unit_price,
+              ei.total
+            FROM estimate_items ei
+            JOIN estimates e
+              ON e.id = ei.estimate_id
+            WHERE e.object_id = ?
+            ORDER BY ei.id
+          `)
+          .bind(objectId)
+          .all();
+
+        // Фінансові операції
+        const paymentsResult = await env.DB
+          .prepare(`
+            SELECT
+              id,
+              type,
+              amount,
+              description,
+              created_at
+            FROM payments
+            WHERE object_id = ?
+            ORDER BY id
+          `)
+          .bind(objectId)
+          .all();
+
+        // Історія
+        const eventsResult = await env.DB
+          .prepare(`
+            SELECT
+              id,
+              event_type,
+              content,
+              author_type,
+              author_id,
+              created_at
+            FROM events
+            WHERE object_id = ?
+            ORDER BY id DESC
+          `)
+          .bind(objectId)
+          .all();
+
+        // Важливе
+        const importantResult = await env.DB
+          .prepare(`
+            SELECT
+              id,
+              title,
+              content,
+              file_id,
+              created_at,
+              created_by
+            FROM important
+            WHERE object_id = ?
+            ORDER BY id DESC
+          `)
+          .bind(objectId)
+          .all();
+
+        // Файли
+        const filesResult = await env.DB
+          .prepare(`
+            SELECT
+              id,
+              name,
+              file_type,
+              storage_key,
+              version,
+              uploaded_by,
+              created_at
+            FROM files
+            WHERE object_id = ?
+            ORDER BY id DESC
+          `)
+          .bind(objectId)
+          .all();
+
+        // Фінансовий підсумок
+        const receivedResult = await env.DB
+          .prepare(`
+            SELECT
+              COALESCE(
+                SUM(
+                  CASE
+                    WHEN type = 'materials_received'
+                    THEN amount
+                    ELSE 0
+                  END
+                ),
+                0
+              ) AS received,
+
+              COALESCE(
+                SUM(
+                  CASE
+                    WHEN type = 'materials_spent'
+                    THEN amount
+                    ELSE 0
+                  END
+                ),
+                0
+              ) AS spent
+
+            FROM payments
+            WHERE object_id = ?
+          `)
+          .bind(objectId)
+          .first();
+
+        const received = Number(receivedResult?.received || 0);
+        const spent = Number(receivedResult?.spent || 0);
+
+        return new Response(
+          JSON.stringify({
+            ok: true,
+
+            object: objectResult,
+
+            estimates: estimatesResult.results || [],
+
+            estimate_items:
+              estimateItemsResult.results || [],
+
+            payments:
+              paymentsResult.results || [],
+
+            financial: {
+              received,
+              spent,
+              balance: received - spent,
+            },
+
+            events:
+              eventsResult.results || [],
+
+            important:
+              importantResult.results || [],
+
+            files:
+              filesResult.results || [],
+          }),
+          {
+            status: 200,
+            headers: {
+              ...cors,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+
+      } catch (error) {
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: error?.message || "Unknown D1 error",
+          }),
+          {
+            status: 500,
+            headers: {
+              ...cors,
+              "Content-Type": "application/json",
+            },
+          }
+        );
+      }
+    }
+
+    // ==========================================
+    // Діагностика Worker
+    // ==========================================
+
     if (request.method === "GET") {
       return new Response(
         JSON.stringify({
           ok: true,
           BOT_TOKEN: !!env.BOT_TOKEN,
           CHAT_ID: !!env.CHAT_ID,
+          DB: !!env.DB,
           bindings: Object.keys(env),
         }),
         {
@@ -38,9 +302,10 @@ export default {
       );
     }
 
-    // --------------------------------------------------
-    // ONLY POST
-    // --------------------------------------------------
+    // ==========================================
+    // POST — існуюча заявка з сайту
+    // ==========================================
+
     if (request.method !== "POST") {
       return new Response(
         JSON.stringify({
@@ -58,10 +323,6 @@ export default {
     }
 
     try {
-
-      // ------------------------------------------------
-      // CHECK SECRETS
-      // ------------------------------------------------
       if (!env.BOT_TOKEN) {
         throw new Error("BOT_TOKEN binding is NOT available");
       }
@@ -70,9 +331,6 @@ export default {
         throw new Error("CHAT_ID binding is NOT available");
       }
 
-      // ------------------------------------------------
-      // READ REQUEST
-      // ------------------------------------------------
       let data;
 
       try {
@@ -87,9 +345,6 @@ export default {
         source,
       } = data;
 
-      // ------------------------------------------------
-      // VALIDATE FORM
-      // ------------------------------------------------
       if (!name || !phone) {
         return new Response(
           JSON.stringify({
@@ -106,9 +361,6 @@ export default {
         );
       }
 
-      // ------------------------------------------------
-      // TELEGRAM MESSAGE
-      // ------------------------------------------------
       const text = `🏠 НОВА ЗАЯВКА
 
 👤 Ім'я: ${name}
@@ -116,9 +368,6 @@ export default {
 🔗 Джерело: ${source || "сайт"}
 🕐 Час: ${new Date().toLocaleString("uk-UA")}`;
 
-      // ------------------------------------------------
-      // TELEGRAM API
-      // ------------------------------------------------
       const telegramUrl =
         `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`;
 
@@ -133,9 +382,6 @@ export default {
         }),
       });
 
-      // ------------------------------------------------
-      // TELEGRAM RESPONSE
-      // ------------------------------------------------
       let telegramData;
 
       try {
@@ -146,9 +392,6 @@ export default {
         );
       }
 
-      // ------------------------------------------------
-      // TELEGRAM ERROR
-      // ------------------------------------------------
       if (!telegramResponse.ok || !telegramData.ok) {
         return new Response(
           JSON.stringify({
@@ -166,9 +409,6 @@ export default {
         );
       }
 
-      // ------------------------------------------------
-      // SUCCESS
-      // ------------------------------------------------
       return new Response(
         JSON.stringify({
           ok: true,
@@ -184,10 +424,6 @@ export default {
       );
 
     } catch (error) {
-
-      // ------------------------------------------------
-      // WORKER ERROR
-      // ------------------------------------------------
       return new Response(
         JSON.stringify({
           ok: false,
