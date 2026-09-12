@@ -343,6 +343,143 @@ export default {
       }
 
       // =========================================================
+      // POST /request/:requestCode/status
+      // Change request status
+      // =========================================================
+
+      if (
+        request.method === "POST" &&
+        path.startsWith("/request/") &&
+        path.endsWith("/status")
+      ) {
+        const requestCode = decodeURIComponent(
+          path
+            .replace("/request/", "")
+            .replace("/status", "")
+            .replace(/\/+$/, "")
+        );
+
+        if (!requestCode) {
+          return json(
+            {
+              ok: false,
+              error: "Request code missing",
+            },
+            400
+          );
+        }
+
+        let body;
+
+        try {
+          body = await request.json();
+        } catch {
+          return json(
+            {
+              ok: false,
+              error: "Invalid JSON body",
+            },
+            400
+          );
+        }
+
+        const newStatus =
+          String(body.status || "").trim();
+
+        // Check that status is allowed
+        if (!STATUS_LABELS[newStatus]) {
+          return json(
+            {
+              ok: false,
+              error: "Invalid status",
+              allowed_statuses: Object.keys(
+                STATUS_LABELS
+              ),
+            },
+            400
+          );
+        }
+
+        // Find request
+        const requestResult =
+          await env.DB.prepare(`
+            SELECT
+              id,
+              request_code,
+              status
+            FROM requests
+            WHERE request_code = ?
+            LIMIT 1
+          `)
+            .bind(requestCode)
+            .all();
+
+        if (
+          !requestResult.results ||
+          !requestResult.results.length
+        ) {
+          return json(
+            {
+              ok: false,
+              error: "Request not found",
+            },
+            404
+          );
+        }
+
+        const currentRequest =
+          requestResult.results[0];
+
+        const oldStatus =
+          currentRequest.status;
+
+        // Update status
+        const updateResult =
+          await env.DB.prepare(`
+            UPDATE requests
+            SET
+              status = ?,
+              updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+          `)
+            .bind(
+              newStatus,
+              currentRequest.id
+            )
+            .run();
+
+        if (
+          !updateResult.meta ||
+          updateResult.meta.changes !== 1
+        ) {
+          return json(
+            {
+              ok: false,
+              error: "Status could not be updated",
+            },
+            500
+          );
+        }
+
+        return json({
+          ok: true,
+          request: {
+            id: currentRequest.id,
+            request_code:
+              currentRequest.request_code,
+            old_status: oldStatus,
+            old_status_label:
+              STATUS_LABELS[oldStatus] ||
+              oldStatus ||
+              "Невідомо",
+            status: newStatus,
+            status_label:
+              STATUS_LABELS[newStatus],
+          },
+        });
+      }
+
+      // =========================================================
       // GET /request/:requestCode
       // =========================================================
 
