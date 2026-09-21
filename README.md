@@ -27,3 +27,4 @@ npx wrangler deploy
 ```bash
 npx wrangler d1 execute sa-master-db --file=./schema.sql --remote
 ```
+
