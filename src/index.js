@@ -44,7 +44,7 @@ const routePublic = createRouter(PUBLIC_ROUTES);
 const routeAdmin  = createRouter(ADMIN_ROUTES);
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === "OPTIONS") return preflight();
 
     const headers = corsHeaders();
@@ -52,13 +52,13 @@ export default {
 
     try {
       const pub = await routePublic(request, url);
-      if (pub) return await pub.handler(request, env, headers, pub.params, url);
+      if (pub) return await pub.handler(request, env, headers, pub.params, url, ctx);
 
       const admin = await routeAdmin(request, url);
       if (admin) {
         const authError = requireAuth(request, env, headers);
         if (authError) return authError;
-        return await admin.handler(request, env, headers, admin.params, url);
+        return await admin.handler(request, env, headers, admin.params, url, ctx);
       }
 
       return error("Not found", headers, 404);
