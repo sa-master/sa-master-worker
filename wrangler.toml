@@ -1,12 +1,20 @@
 name = "sa-master-worker"
-main = "worker.js"
-compatibility_date = "2025-09-01"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "sa-master-db"
-database_id = "61a1c743-519d-45ea-8d4f-1ac93df683ca"
+database_id = "REPLACE_WITH_YOUR_ID"
 
 [[r2_buckets]]
 binding = "FILES"
 bucket_name = "sa-master-files"
+
+[vars]
+ENVIRONMENT = "production"
+
+# Секрети (через `wrangler secret put`):
+#   BOT_TOKEN       — Telegram bot token
+#   CHAT_ID         — Telegram chat id
+#   ADMIN_TOKEN     — Bearer-токен для адмін-ендпоінтів
