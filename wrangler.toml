@@ -5,7 +5,7 @@ compatibility_date = "2025-01-01"
 [[d1_databases]]
 binding = "DB"
 database_name = "sa-master-db"
-database_id = "ВСТАВТЕ_ВАШ_D1_ID"
+database_id = "61a1c743-519d-45ea-8d4f-1ac93df683ca"
 
 [[r2_buckets]]
 binding = "FILES"
