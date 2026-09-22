@@ -13,6 +13,7 @@ import {
   handleAttachClient,
   handleTelegramWebhook,
 } from "./handlers/requests.js";
+import { handleJobsWebhook } from "./handlers/jobs.js";
 import {
   handleGetObject,
   handleUpdateObject,
@@ -24,9 +25,10 @@ import {
 } from "./handlers/files.js";
 
 const PUBLIC_ROUTES = [
-  ["GET",  /^\/$/,                 handleHealth,           { auth: false }],
-  ["POST", /^\/$/,                 handleCreateRequest,    { auth: false }],
-  ["POST", /^\/telegram-webhook$/, handleTelegramWebhook,  { auth: false }],
+  ["GET",  /^\/$/,                 handleHealth,          { auth: false }],
+  ["POST", /^\/$/,                 handleCreateRequest,   { auth: false }],
+  ["POST", /^\/telegram-webhook$/, handleTelegramWebhook, { auth: false }],
+  ["POST", /^\/jobs-webhook$/,     handleJobsWebhook,     { auth: false }],
 ];
 
 const ADMIN_ROUTES = [
