@@ -13,6 +13,7 @@ import {
   canChangeStatus,
   formatRequestText,
 } from "../lib/telegram-buttons.js";
+import { publishRequestToJobsGroup } from "./jobs.js";
 
 const CURRENT_YEAR = 2026;
 
@@ -118,6 +119,8 @@ export async function handleCreateRequest(request, env, headers) {
   ].join("\n");
 
   const buttons = buildStatusButtons(requestCode, "new");
+  buttons.push([{ text: "🤝 Передати в канал", callback_data: `transfer_to_jobs:${requestCode}` }]);
+
   const tg = await sendMessageWithButtons(env, text, buttons);
   if (!tg.ok) {
     console.error("Telegram send failed:", tg.description || tg);
@@ -423,6 +426,12 @@ export async function handleTelegramWebhook(request, env, headers) {
     );
   }
 
+  /* ---- Передати в канал майстрів ---- */
+  if (data.startsWith("transfer_to_jobs:")) {
+    const requestCode = data.slice(17);
+    return await handleTransferToJobs(env, headers, requestCode, cq, chatId, messageId);
+  }
+
   /* Невідома команда */
   await answerCallbackQuery(env, cq.id, "❓ Невідома дія", true);
   return json({ ok: true }, headers);
@@ -534,6 +543,68 @@ async function handleTelegramStatusUpdate(
 
   await editMessageText(env, chatId, messageId, text, buttons);
   await answerCallbackQuery(env, callbackId, `✅ ${newLabel}`);
+
+  return json({ ok: true }, headers);
+}
+
+/* ---- Передати заявку в канал майстрів ---- */
+async function handleTransferToJobs(env, headers, requestCode, cq, chatId, messageId) {
+  const req = await env.DB.prepare(`
+    SELECT * FROM requests WHERE request_code = ? LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!req) {
+    await answerCallbackQuery(env, cq.id, "❌ Заявку не знайдено", true);
+    return json({ ok: true }, headers);
+  }
+
+  /* Перевірка: чи заявка вже передана */
+  if (req.transferred_to_jobs) {
+    await answerCallbackQuery(env, cq.id, "⚠️ Уже передано в канал", true);
+    return json({ ok: true }, headers);
+  }
+
+  /* Публікуємо в групу */
+  const result = await publishRequestToJobsGroup(env, req);
+
+  if (!result.ok) {
+    console.error("Publish to jobs group failed:", result.description || result);
+    await answerCallbackQuery(env, cq.id, "❌ Не вдалося опублікувати", true);
+    return json({ ok: true }, headers);
+  }
+
+  /* Позначаємо заявку як передану */
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE requests
+        SET transferred_to_jobs = 1,
+            transferred_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(req.id),
+      env.DB.prepare(`
+        INSERT INTO events (object_id, request_id, event_type, content, author_type)
+        VALUES (?, ?, 'transferred_to_jobs', 'Передано в канал майстрів', 'system')
+      `).bind(req.object_id || null, req.id),
+    ]);
+  } catch (err) {
+    console.error("Mark as transferred failed:", err);
+  }
+
+  /* Оновлюємо повідомлення в чаті з тобою */
+  const updatedText = [
+    `🏠 ЗАЯВКА ${req.request_code}`,
+    `👤 ${req.name}`,
+    `📞 ${req.phone}`,
+    `📊 Статус: Передано в канал майстрів`,
+    `🕐 ${new Date().toLocaleString("uk-UA", { timeZone: "Europe/Kyiv" })}`,
+  ].join("\n");
+
+  const buttons = buildStatusButtons(req.request_code, req.status);
+  await editMessageText(env, chatId, messageId, updatedText, buttons);
+
+  await answerCallbackQuery(env, cq.id, "✅ Передано в канал майстрів");
 
   return json({ ok: true }, headers);
 }
