@@ -2,10 +2,23 @@ import { json, error } from "../lib/json.js";
 import { STATUS_LABELS, statusLabel, isValidStatus, withStatusLabel } from "../lib/statuses.js";
 import { normalizePhone, isValidPhone } from "../lib/phone.js";
 import { str } from "../lib/validate.js";
-import { sendTelegram } from "../lib/telegram.js";
+import {
+  sendTelegram,
+  sendMessageWithButtons,
+  editMessageText,
+  answerCallbackQuery,
+} from "../lib/telegram.js";
+import {
+  buildStatusButtons,
+  canChangeStatus,
+  formatRequestText,
+} from "../lib/telegram-buttons.js";
 
 const CURRENT_YEAR = 2026;
 
+/* =========================================================
+ * POST / — створення заявки (публічний)
+ * ========================================================= */
 export async function handleCreateRequest(request, env, headers) {
   let body;
   try { body = await request.json(); }
@@ -88,9 +101,10 @@ export async function handleCreateRequest(request, env, headers) {
     return error("Помилка створення заявки", headers, 500);
   }
 
-  const telegramText = [
+  /* Сформувати повідомлення з кнопками */
+  const text = [
     "🏠 НОВА ЗАЯВКА",
-    `🆔 ID: ${requestCode}`,
+    `🆔 ${requestCode}`,
     `👤 Ім'я: ${name}`,
     `📞 Телефон: ${normalizedPhone}`,
     `🔧 Тип: ${typeLabel}`,
@@ -103,7 +117,11 @@ export async function handleCreateRequest(request, env, headers) {
     `🕐 Час: ${new Date().toLocaleString("uk-UA", { timeZone: "Europe/Kyiv" })}`,
   ].join("\n");
 
-  await sendTelegram(env, telegramText);
+  const buttons = buildStatusButtons(requestCode, "new");
+  const tg = await sendMessageWithButtons(env, text, buttons);
+  if (!tg.ok) {
+    console.error("Telegram send failed:", tg.description || tg);
+  }
 
   return json(
     {
@@ -120,6 +138,9 @@ export async function handleCreateRequest(request, env, headers) {
   );
 }
 
+/* =========================================================
+ * GET /requests (admin)
+ * ========================================================= */
 export async function handleListRequests(request, env, headers, _params, url) {
   const limit  = Math.min(Number(url.searchParams.get("limit")) || 50, 200);
   const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
@@ -140,6 +161,9 @@ export async function handleListRequests(request, env, headers, _params, url) {
   return json({ ok: true, requests, limit, offset }, headers);
 }
 
+/* =========================================================
+ * GET /request/:code (admin)
+ * ========================================================= */
 export async function handleGetRequest(request, env, headers, params) {
   const [requestCode] = params;
 
@@ -174,6 +198,9 @@ export async function handleGetRequest(request, env, headers, params) {
   );
 }
 
+/* =========================================================
+ * POST /request/:code/status (admin)
+ * ========================================================= */
 export async function handleUpdateStatus(request, env, headers, params) {
   const [requestCode] = params;
 
@@ -267,6 +294,9 @@ export async function handleUpdateStatus(request, env, headers, params) {
   );
 }
 
+/* =========================================================
+ * GET /request/:code/events (admin)
+ * ========================================================= */
 export async function handleGetEvents(request, env, headers, params) {
   const [requestCode] = params;
 
@@ -296,6 +326,9 @@ export async function handleGetEvents(request, env, headers, params) {
   );
 }
 
+/* =========================================================
+ * POST /request/:code/client (admin)
+ * ========================================================= */
 export async function handleAttachClient(request, env, headers, params) {
   const [requestCode] = params;
 
@@ -343,4 +376,164 @@ export async function handleAttachClient(request, env, headers, params) {
     },
     headers
   );
+}
+
+/* =========================================================
+ * POST /telegram-webhook — прийом callback-ів від Telegram
+ * Без авторизації (Telegram не передає токен).
+ * Захист — перевірка chat_id === env.CHAT_ID.
+ * ========================================================= */
+export async function handleTelegramWebhook(request, env, headers) {
+  let update;
+  try { update = await request.json(); }
+  catch { return json({ ok: false }, headers, 400); }
+
+  /* Нас цікавлять тільки callback_query (натискання кнопок) */
+  if (!update.callback_query) {
+    return json({ ok: true }, headers);
+  }
+
+  const cq = update.callback_query;
+  const fromId = cq.from?.id;
+
+  /* Перевірка: чи це наш CHAT_ID */
+  if (String(fromId) !== String(env.CHAT_ID)) {
+    await answerCallbackQuery(env, cq.id, "❌ Немає доступу", true);
+    return json({ ok: true }, headers);
+  }
+
+  const data = String(cq.data || "");
+  const message = cq.message;
+  const chatId = message?.chat?.id;
+  const messageId = message?.message_id;
+
+  /* ---- Деталі ---- */
+  if (data.startsWith("details:")) {
+    const requestCode = data.slice(8);
+    return await handleTelegramDetails(env, headers, requestCode, cq.id, chatId);
+  }
+
+  /* ---- Зміна статусу ---- */
+  if (data.startsWith("status:")) {
+    const parts = data.split(":");
+    const requestCode = parts[1];
+    const newStatus = parts[2];
+    return await handleTelegramStatusUpdate(
+      env, headers, requestCode, newStatus, cq.id, chatId, messageId
+    );
+  }
+
+  /* Невідома команда */
+  await answerCallbackQuery(env, cq.id, "❓ Невідома дія", true);
+  return json({ ok: true }, headers);
+}
+
+/* ---- Деталі заявки ---- */
+async function handleTelegramDetails(env, headers, requestCode, callbackId, chatId) {
+  const req = await env.DB.prepare(`
+    SELECT * FROM requests WHERE request_code = ? LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!req) {
+    await answerCallbackQuery(env, callbackId, "❌ Заявку не знайдено", true);
+    return json({ ok: true }, headers);
+  }
+
+  const events = await env.DB.prepare(`
+    SELECT event_type, content, created_at
+    FROM events WHERE request_id = ? ORDER BY id ASC
+  `).bind(req.id).all();
+
+  const lines = [
+    formatRequestText(req),
+    ``,
+    `🕐 Створено: ${req.created_at || "—"}`,
+    `🕐 Оновлено: ${req.updated_at || "—"}`,
+  ];
+
+  if (events.results?.length) {
+    lines.push(``);
+    lines.push(`📜 Історія:`);
+    for (const ev of events.results.slice(-10)) {
+      lines.push(`• ${ev.content}`);
+    }
+  }
+
+  const text = lines.join("\n");
+
+  /* Надсилаємо окремим повідомленням (щоб не затерти картку з кнопками) */
+  await sendTelegram(env, text);
+  await answerCallbackQuery(env, callbackId, "");
+
+  return json({ ok: true }, headers);
+}
+
+/* ---- Зміна статусу з Telegram ---- */
+async function handleTelegramStatusUpdate(
+  env, headers, requestCode, newStatus, callbackId, chatId, messageId
+) {
+  if (!isValidStatus(newStatus)) {
+    await answerCallbackQuery(env, callbackId, "❌ Невідомий статус", true);
+    return json({ ok: true }, headers);
+  }
+
+  const current = await env.DB.prepare(`
+    SELECT id, request_code, status, object_id, name, phone
+    FROM requests WHERE request_code = ? LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!current) {
+    await answerCallbackQuery(env, callbackId, "❌ Заявку не знайдено", true);
+    return json({ ok: true }, headers);
+  }
+
+  if (!canChangeStatus(current.status, newStatus)) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      `❌ Неможливо: статус «${statusLabel(current.status)}» → «${statusLabel(newStatus)}»`,
+      true
+    );
+    return json({ ok: true }, headers);
+  }
+
+  const oldLabel = statusLabel(current.status);
+  const newLabel = statusLabel(newStatus);
+  const eventContent = `${oldLabel} → ${newLabel}`;
+
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE requests SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+      `).bind(newStatus, current.id),
+      env.DB.prepare(`
+        INSERT INTO events (object_id, request_id, event_type, content, author_type)
+        VALUES (?, ?, 'status_changed', ?, 'system')
+      `).bind(current.object_id || null, current.id, eventContent),
+    ]);
+  } catch (err) {
+    console.error("Telegram status update failed:", err);
+    await answerCallbackQuery(env, callbackId, "❌ Помилка збереження", true);
+    return json({ ok: true }, headers);
+  }
+
+  /* Оновити повідомлення в Telegram */
+  const req = await env.DB.prepare(`
+    SELECT * FROM requests WHERE id = ? LIMIT 1
+  `).bind(current.id).first();
+
+  const text = [
+    `🏠 ЗАЯВКА ${req.request_code}`,
+    `👤 ${req.name}`,
+    `📞 ${req.phone}`,
+    `📊 Статус: ${newLabel}`,
+    `🕐 Оновлено: ${new Date().toLocaleString("uk-UA", { timeZone: "Europe/Kyiv" })}`,
+  ].join("\n");
+
+  const buttons = buildStatusButtons(req.request_code, newStatus);
+
+  await editMessageText(env, chatId, messageId, text, buttons);
+  await answerCallbackQuery(env, callbackId, `✅ ${newLabel}`);
+
+  return json({ ok: true }, headers);
 }
