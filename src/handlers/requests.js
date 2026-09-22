@@ -320,8 +320,8 @@ export async function handleAttachClient(request, env, headers, params) {
   ).bind(normalizedPhone).first();
 
   let created = false;
-  в if (!client) {
-ни    const ins = await env.DB.prepare(`
+  if (!client) {
+    const ins = await env.DB.prepare(`
       INSERT INTO clients (name, phone) VALUES (?, ?)
     `).bind(req.name || "—", normalizedPhone).run();
     if (!ins.meta?.last_row_id) return error("Не вдалося створити клієнта", headers, 500);
