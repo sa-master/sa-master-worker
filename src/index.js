@@ -11,6 +11,7 @@ import {
   handleUpdateStatus,
   handleGetEvents,
   handleAttachClient,
+  handleTelegramWebhook,
 } from "./handlers/requests.js";
 import {
   handleGetObject,
@@ -23,8 +24,9 @@ import {
 } from "./handlers/files.js";
 
 const PUBLIC_ROUTES = [
-  ["GET",  /^\/$/, handleHealth,        { auth: false }],
-  ["POST", /^\/$/, handleCreateRequest, { auth: false }],
+  ["GET",  /^\/$/,                 handleHealth,           { auth: false }],
+  ["POST", /^\/$/,                 handleCreateRequest,    { auth: false }],
+  ["POST", /^\/telegram-webhook$/, handleTelegramWebhook,  { auth: false }],
 ];
 
 const ADMIN_ROUTES = [
