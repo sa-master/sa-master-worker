@@ -8,6 +8,11 @@ import {
 } from "../lib/telegram-jobs.js";
 import { sendTelegram } from "../lib/telegram.js";
 import { buildMasterOutcomeButtons } from "../lib/telegram-buttons.js";
+import {
+  handleJoinStart,
+  handleJoinMessage,
+  handleApplicationReview,
+} from "./join.js";
 
 /* =========================================================
  * Публікація заявки в групу майстрів
@@ -32,35 +37,72 @@ export async function publishRequestToJobsGroup(env, request) {
 }
 
 /* =========================================================
- * POST /jobs-webhook — прийом callback від 2-го бота
+ * POST /jobs-webhook — прийом callback і повідомлень
  * ========================================================= */
 export async function handleJobsWebhook(request, env, headers) {
   let update;
   try { update = await request.json(); }
   catch { return json({ ok: false }, headers, 400); }
 
-  if (!update.callback_query) {
+  /* ---- Звичайні повідомлення (для /join) ---- */
+  if (update.message) {
+    const msg = update.message;
+    const chatId = msg.chat.id;
+    const fromUser = msg.from;
+    const text = String(msg.text || "").trim();
+
+    /* /start — привітання */
+    if (text === "/start" || text.startsWith("/start ")) {
+      await sendToMaster(
+        env,
+        chatId,
+        "👋 Вітаю! Я — бот SA-MASTER Jobs.\n\nЩоб подати анкету майстра — напишіть /join."
+      );
+      return json({ ok: true }, headers);
+    }
+
+    /* /join — початок анкети */
+    if (text === "/join" || text.startsWith("/join ")) {
+      return await handleJoinStart(env, headers, chatId, fromUser);
+    }
+
+    /* Інші повідомлення — перевіряємо, чи це анкета */
+    return await handleJoinMessage(env, headers, chatId, fromUser, text);
+  }
+
+  /* ---- Callback query (кнопки) ---- */
+  if (update.callback_query) {
+    const cq = update.callback_query;
+    const data = String(cq.data || "");
+
+    /* Взяти в роботу */
+    if (data.startsWith("take:")) {
+      const requestCode = data.slice(5);
+      return await handleTakeJob(env, headers, requestCode, cq);
+    }
+
+    /* Результат від майстра */
+    if (data.startsWith("outcome:")) {
+      const parts = data.split(":");
+      const requestCode = parts[1];
+      const outcome = parts[2];
+      return await handleMasterOutcome(env, headers, requestCode, outcome, cq);
+    }
+
+    /* Підтвердження/відхилення анкети (адмін) */
+    if (data.startsWith("app_approve:")) {
+      const appId = Number(data.slice(12));
+      return await handleApplicationReview(env, headers, appId, "approve", cq);
+    }
+    if (data.startsWith("app_reject:")) {
+      const appId = Number(data.slice(11));
+      return await handleApplicationReview(env, headers, appId, "reject", cq);
+    }
+
+    await answerJobsCallback(env, cq.id, "❓ Невідома дія", true);
     return json({ ok: true }, headers);
   }
 
-  const cq = update.callback_query;
-  const data = String(cq.data || "");
-
-  /* ---- Взяти в роботу ---- */
-  if (data.startsWith("take:")) {
-    const requestCode = data.slice(5);
-    return await handleTakeJob(env, headers, requestCode, cq);
-  }
-
-  /* ---- Результат від майстра ---- */
-  if (data.startsWith("outcome:")) {
-    const parts = data.split(":");
-    const requestCode = parts[1];
-    const outcome = parts[2];
-    return await handleMasterOutcome(env, headers, requestCode, outcome, cq);
-  }
-
-  await answerJobsCallback(env, cq.id, "❓ Невідома дія", true);
   return json({ ok: true }, headers);
 }
 
@@ -124,7 +166,6 @@ async function handleTakeJob(env, headers, requestCode, cq) {
     return json({ ok: true }, headers);
   }
 
-  /* Оновлюємо повідомлення в групі */
   const updatedText = [
     `✅ ЗАЯВКА ${req.request_code}`,
     `👤 ${req.name}`,
@@ -135,7 +176,6 @@ async function handleTakeJob(env, headers, requestCode, cq) {
 
   await editJobsMessage(env, cq.message.message_id, updatedText, []);
 
-  /* Надсилаємо контакти майстру з кнопками результату */
   const contactsText = [
     `✅ Ви взяли заявку ${req.request_code}`,
     ``,
@@ -151,7 +191,6 @@ async function handleTakeJob(env, headers, requestCode, cq) {
   const outcomeButtons = buildMasterOutcomeButtons(req.request_code);
   await sendToMaster(env, masterId, contactsText, outcomeButtons);
 
-  /* Сповіщаємо адміна */
   const adminText = [
     `🔔 ЗАЯВКУ ВЗЯТО`,
     `🆔 ${req.request_code}`,
@@ -187,7 +226,6 @@ async function handleMasterOutcome(env, headers, requestCode, outcome, cq) {
     return json({ ok: true }, headers);
   }
 
-  /* Записуємо результат */
   try {
     await env.DB.prepare(`
       INSERT INTO request_outcomes (request_id, master_id, outcome)
@@ -197,7 +235,6 @@ async function handleMasterOutcome(env, headers, requestCode, outcome, cq) {
     console.error("Save outcome failed:", err);
   }
 
-  /* Лічильники майстра */
   if (outcome === "working") {
     await env.DB.prepare(`
       UPDATE masters SET good_deals_count = COALESCE(good_deals_count, 0) + 1 WHERE telegram_id = ?
@@ -212,7 +249,6 @@ async function handleMasterOutcome(env, headers, requestCode, outcome, cq) {
     `).bind(masterId).run();
   }
 
-  /* Лічильники клієнта */
   if (outcome === "no_answer" && req.client_id) {
     await env.DB.prepare(`
       UPDATE clients SET no_answer_count = COALESCE(no_answer_count, 0) + 1 WHERE id = ?
