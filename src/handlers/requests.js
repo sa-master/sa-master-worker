@@ -102,7 +102,6 @@ export async function handleCreateRequest(request, env, headers) {
     return error("Помилка створення заявки", headers, 500);
   }
 
-  /* Сформувати повідомлення з кнопками */
   const text = [
     "🏠 НОВА ЗАЯВКА",
     `🆔 ${requestCode}`,
@@ -432,6 +431,20 @@ export async function handleTelegramWebhook(request, env, headers) {
     return await handleTransferToJobs(env, headers, requestCode, cq, chatId, messageId);
   }
 
+  /* ---- Анкета майстра: прийняти ---- */
+  if (data.startsWith("app_approve:")) {
+    const appId = Number(data.slice(12));
+    const { handleApplicationReview } = await import("./join.js");
+    return await handleApplicationReview(env, headers, appId, "approve", cq);
+  }
+
+  /* ---- Анкета майстра: відхилити ---- */
+  if (data.startsWith("app_reject:")) {
+    const appId = Number(data.slice(11));
+    const { handleApplicationReview } = await import("./join.js");
+    return await handleApplicationReview(env, headers, appId, "reject", cq);
+  }
+
   /* Невідома команда */
   await answerCallbackQuery(env, cq.id, "❓ Невідома дія", true);
   return json({ ok: true }, headers);
@@ -470,7 +483,6 @@ async function handleTelegramDetails(env, headers, requestCode, callbackId, chat
 
   const text = lines.join("\n");
 
-  /* Надсилаємо окремим повідомленням (щоб не затерти картку з кнопками) */
   await sendTelegram(env, text);
   await answerCallbackQuery(env, callbackId, "");
 
@@ -526,7 +538,6 @@ async function handleTelegramStatusUpdate(
     return json({ ok: true }, headers);
   }
 
-  /* Оновити повідомлення в Telegram */
   const req = await env.DB.prepare(`
     SELECT * FROM requests WHERE id = ? LIMIT 1
   `).bind(current.id).first();
@@ -558,13 +569,11 @@ async function handleTransferToJobs(env, headers, requestCode, cq, chatId, messa
     return json({ ok: true }, headers);
   }
 
-  /* Перевірка: чи заявка вже передана */
   if (req.transferred_to_jobs) {
     await answerCallbackQuery(env, cq.id, "⚠️ Уже передано в канал", true);
     return json({ ok: true }, headers);
   }
 
-  /* Публікуємо в групу */
   const result = await publishRequestToJobsGroup(env, req);
 
   if (!result.ok) {
@@ -573,7 +582,6 @@ async function handleTransferToJobs(env, headers, requestCode, cq, chatId, messa
     return json({ ok: true }, headers);
   }
 
-  /* Позначаємо заявку як передану */
   try {
     await env.DB.batch([
       env.DB.prepare(`
@@ -592,7 +600,6 @@ async function handleTransferToJobs(env, headers, requestCode, cq, chatId, messa
     console.error("Mark as transferred failed:", err);
   }
 
-  /* Оновлюємо повідомлення в чаті з тобою */
   const updatedText = [
     `🏠 ЗАЯВКА ${req.request_code}`,
     `👤 ${req.name}`,
