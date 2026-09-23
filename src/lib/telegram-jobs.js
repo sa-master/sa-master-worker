@@ -74,3 +74,19 @@ export async function sendToMaster(env, chatId, text, inlineKeyboard) {
 
   return callJobsBot(env, "sendMessage", payload);
 }
+
+/* Створити одноразове посилання на групу (24 год, 1 людина) */
+export async function createInviteLink(env) {
+  if (!env.JOBS_CHAT_ID) {
+    return { ok: false, description: "JOBS_CHAT_ID не встановлено" };
+  }
+
+  const expireDate = Math.floor(Date.now() / 1000) + 24 * 60 * 60; // 24 години
+
+  return callJobsBot(env, "createChatInviteLink", {
+    chat_id: env.JOBS_CHAT_ID,
+    member_limit: 1,
+    expire_date: expireDate,
+    name: "SA-MASTER invite",
+  });
+}
