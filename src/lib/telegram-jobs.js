@@ -63,11 +63,14 @@ export async function answerJobsCallback(env, callbackQueryId, text, showAlert =
   });
 }
 
-/* Надіслати в приватний чат майстру */
-export async function sendToMaster(env, chatId, text) {
-  return callJobsBot(env, "sendMessage", {
+/* Надіслати в приватний чат майстру (з опціональними кнопками) */
+export async function sendToMaster(env, chatId, text, inlineKeyboard) {
+  const payload = {
     chat_id: chatId,
     text,
     disable_web_page_preview: true,
-  });
+  };
+  if (inlineKeyboard) payload.reply_markup = { inline_keyboard: inlineKeyboard };
+
+  return callJobsBot(env, "sendMessage", payload);
 }
