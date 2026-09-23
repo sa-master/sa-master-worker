@@ -4,7 +4,7 @@ function apiUrl(env, method) {
   return `${TELEGRAM_API}/bot${env.BOT_TOKEN}/${method}`;
 }
 
-/* Базовий надсилач — повертає { ok, result, description } */
+/* Базовий виклик Telegram API — повертає { ok, result, description } */
 async function callTelegram(env, method, payload) {
   if (!env.BOT_TOKEN) {
     return { ok: false, description: "BOT_TOKEN не встановлено" };
@@ -26,7 +26,7 @@ async function callTelegram(env, method, payload) {
   }
 }
 
-/* Просте текстове повідомлення */
+/* Просте текстове повідомлення (в твій особистий чат) */
 export async function sendTelegram(env, text) {
   if (!env.CHAT_ID) return { ok: false, description: "CHAT_ID не встановлено" };
   return callTelegram(env, "sendMessage", {
@@ -36,26 +36,28 @@ export async function sendTelegram(env, text) {
   });
 }
 
-/* Повідомлення з inline-кнопками */
+/* Повідомлення з inline-кнопками (в твій особистий чат) */
 export async function sendMessageWithButtons(env, text, inlineKeyboard) {
   if (!env.CHAT_ID) return { ok: false, description: "CHAT_ID не встановлено" };
-  return callTelegram(env, "sendMessage", {
+  const payload = {
     chat_id: env.CHAT_ID,
     text,
     disable_web_page_preview: true,
-    reply_markup: { inline_keyboard: inlineKeyboard },
-  });
+  };
+  if (inlineKeyboard) payload.reply_markup = { inline_keyboard: inlineKeyboard };
+  return callTelegram(env, "sendMessage", payload);
 }
 
 /* Редагувати існуюче повідомлення (текст + кнопки) */
 export async function editMessageText(env, chatId, messageId, text, inlineKeyboard) {
-  return callTelegram(env, "editMessageText", {
+  const payload = {
     chat_id: chatId,
     message_id: messageId,
     text,
     disable_web_page_preview: true,
-    reply_markup: inlineKeyboard ? { inline_keyboard: inlineKeyboard } : undefined,
-  });
+  };
+  if (inlineKeyboard) payload.reply_markup = { inline_keyboard: inlineKeyboard };
+  return callTelegram(env, "editMessageText", payload);
 }
 
 /* Відповідь на натискання кнопки (щоб Telegram прибрав «годинник») */
