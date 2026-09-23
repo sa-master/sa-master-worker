@@ -43,6 +43,7 @@ export async function handleCreateRequest(request, env, headers) {
   const project      = str(body.project,          { max: 200 });
   const consultation = str(body.consultationDate, { max: 100 });
   const source       = str(body.source,           { max: 80 })  || "SA-MASTER.PRO";
+  const notes        = str(body.notes,            { max: 500 });
 
   let requestId, requestCode, clientId = null;
 
@@ -75,13 +76,13 @@ export async function handleCreateRequest(request, env, headers) {
     const insertResult = await env.DB.prepare(`
       INSERT INTO requests (
         request_code, type, type_label, name, phone, location,
-        timing, project, consultation_date, source, status, client_id
+        timing, project, consultation_date, source, status, client_id, notes
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)
     `).bind(
       requestCode, type, typeLabel, name, normalizedPhone,
       location || null, timing || null, project || null,
-      consultation || null, source, clientId
+      consultation || null, source, clientId, notes || null
     ).run();
 
     if (!insertResult.meta?.last_row_id) {
@@ -115,7 +116,8 @@ export async function handleCreateRequest(request, env, headers) {
     `🔗 Джерело: ${source}`,
     `📊 Статус: ${statusLabel("new")}`,
     `🕐 Час: ${new Date().toLocaleString("uk-UA", { timeZone: "Europe/Kyiv" })}`,
-  ].join("\n");
+    notes ? `📝 Опис: ${notes}` : null,
+  ].filter(Boolean).join("\n");
 
   const buttons = buildStatusButtons(requestCode, "new");
   buttons.push([{ text: "🤝 Передати в канал", callback_data: `transfer_to_jobs:${requestCode}` }]);
@@ -382,15 +384,12 @@ export async function handleAttachClient(request, env, headers, params) {
 
 /* =========================================================
  * POST /telegram-webhook — прийом callback-ів від Telegram
- * Без авторизації (Telegram не передає токен).
- * Захист — перевірка chat_id === env.CHAT_ID.
  * ========================================================= */
 export async function handleTelegramWebhook(request, env, headers) {
   let update;
   try { update = await request.json(); }
   catch { return json({ ok: false }, headers, 400); }
 
-  /* Нас цікавлять тільки callback_query (натискання кнопок) */
   if (!update.callback_query) {
     return json({ ok: true }, headers);
   }
@@ -398,7 +397,6 @@ export async function handleTelegramWebhook(request, env, headers) {
   const cq = update.callback_query;
   const fromId = cq.from?.id;
 
-  /* Перевірка: чи це наш CHAT_ID */
   if (String(fromId) !== String(env.CHAT_ID)) {
     await answerCallbackQuery(env, cq.id, "❌ Немає доступу", true);
     return json({ ok: true }, headers);
@@ -445,7 +443,6 @@ export async function handleTelegramWebhook(request, env, headers) {
     return await handleApplicationReview(env, headers, appId, "reject", cq);
   }
 
-  /* Невідома команда */
   await answerCallbackQuery(env, cq.id, "❓ Невідома дія", true);
   return json({ ok: true }, headers);
 }
