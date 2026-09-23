@@ -4,19 +4,7 @@ import {
   answerJobsCallback,
   createInviteLink,
 } from "../lib/telegram-jobs.js";
-import { sendMessageWithButtons } from "../lib/telegram.js";
-
-/* Привітання при /join */
-const SPECIALIZATIONS = [
-  { value: "plumbing", label: "🔧 Сантехніка" },
-  { value: "electric", label: "⚡ Електрика" },
-  { value: "universal", label: "🛠 Універсал" },
-];
-
-const CITIES = [
-  { value: "kyiv", label: "🏙 Київ" },
-  { value: "other", label: "📍 Інше місто" },
-];
+import { sendMessageWithButtons, editMessageText } from "../lib/telegram.js";
 
 /* Запуск анкети */
 export async function handleJoinStart(env, headers, chatId, fromUser) {
@@ -39,7 +27,6 @@ export async function handleJoinStart(env, headers, chatId, fromUser) {
     return json({ ok: true }, headers);
   }
 
-  /* Починаємо анкету */
   await env.DB.prepare(`
     INSERT INTO master_applications (telegram_id, username, first_name, status)
     VALUES (?, ?, ?, 'draft')
@@ -65,7 +52,7 @@ export async function handleJoinMessage(env, headers, chatId, fromUser, text) {
   if (!app) return json({ ok: false }, headers);
 
   /* Крок 1: ім'я */
-  if (!app.first_name || app.first_name === fromUser.first_name) {
+  if (!app.phone && (!app.first_name || app.first_name === fromUser.first_name)) {
     await env.DB.prepare(`
       UPDATE master_applications SET first_name = ? WHERE id = ?
     `).bind(text, app.id).run();
@@ -132,7 +119,6 @@ export async function handleJoinMessage(env, headers, chatId, fromUser, text) {
 
     await sendToMaster(env, chatId, "✅ Дякую! Анкету надіслано на розгляд. Зачекайте, будь ласка.");
 
-    /* Сповіщення адміну */
     const appFull = await env.DB.prepare(`
       SELECT * FROM master_applications WHERE id = ?
     `).bind(app.id).first();
@@ -173,6 +159,17 @@ export async function handleApplicationReview(env, headers, appId, action, cq) {
     return json({ ok: true }, headers);
   }
 
+  /* Перевірка: чи вже оброблено */
+  if (app.status !== "pending") {
+    await answerJobsCallback(env, cq.id, `⚠️ Вже оброблено: ${app.status}`, true);
+    return json({ ok: true }, headers);
+  }
+
+  const chatId = cq.message.chat.id;
+  const messageId = cq.message.message_id;
+  const now = new Date().toLocaleString("uk-UA", { timeZone: "Europe/Kyiv" });
+
+  /* ---- Відхилення ---- */
   if (action === "reject") {
     await env.DB.prepare(`
       UPDATE master_applications SET status = 'rejected', reviewed_at = CURRENT_TIMESTAMP
@@ -180,17 +177,33 @@ export async function handleApplicationReview(env, headers, appId, action, cq) {
     `).bind(appId).run();
 
     await sendToMaster(env, app.telegram_id, "❌ На жаль, вашу анкету відхилено. Дякуємо за інтерес!");
-    await answerJobsCallback(env, cq.id, "Відхилено");
+
+    /* Оновлюємо повідомлення */
+    const rejectedText = [
+      "❌ АНКЕТУ ВІДХИЛЕНО",
+      `👤 ${app.first_name}`,
+      `📞 ${app.phone}`,
+      `🛠 ${app.specializations}`,
+      `🏙 ${app.city}`,
+      `📆 ${app.experience}`,
+      `💬 ${app.about}`,
+      `🆔 Telegram: ${app.telegram_id}`,
+      ``,
+      `❌ Відхилено: ${now}`,
+    ].join("\n");
+
+    await editMessageText(env, chatId, messageId, rejectedText, []);
+
+    await answerJobsCallback(env, cq.id, "❌ Відхилено");
     return json({ ok: true }, headers);
   }
 
-  /* Approve */
+  /* ---- Прийняття ---- */
   await env.DB.prepare(`
     UPDATE master_applications SET status = 'approved', reviewed_at = CURRENT_TIMESTAMP
     WHERE id = ?
   `).bind(appId).run();
 
-  /* Додаємо майстра в базу */
   await env.DB.prepare(`
     INSERT INTO masters (telegram_id, username, first_name, phone, specializations, cities, status, application_id, joined_at)
     VALUES (?, ?, ?, ?, ?, ?, 'active', ?, CURRENT_TIMESTAMP)
@@ -204,7 +217,7 @@ export async function handleApplicationReview(env, headers, appId, action, cq) {
     app.id
   ).run();
 
-  /* Генеруємо одноразове посилання на 24 год */
+  /* Генеруємо посилання */
   const invite = await createInviteLink(env);
 
   if (invite && invite.ok && invite.result?.invite_link) {
@@ -220,6 +233,22 @@ export async function handleApplicationReview(env, headers, appId, action, cq) {
       "✅ Вас прийнято! Очікуйте, скоро додамо вас у групу."
     );
   }
+
+  /* Оновлюємо повідомлення в адміна */
+  const approvedText = [
+    "✅ АНКЕТУ ПРИЙНЯТО",
+    `👤 ${app.first_name}`,
+    `📞 ${app.phone}`,
+    `🛠 ${app.specializations}`,
+    `🏙 ${app.city}`,
+    `📆 ${app.experience}`,
+    `💬 ${app.about}`,
+    `🆔 Telegram: ${app.telegram_id}`,
+    ``,
+    `✅ Прийнято: ${now}`,
+  ].join("\n");
+
+  await editMessageText(env, chatId, messageId, approvedText, []);
 
   await answerJobsCallback(env, cq.id, "✅ Прийнято!");
   return json({ ok: true }, headers);
