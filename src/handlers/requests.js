@@ -17,6 +17,7 @@ import { publishRequestToJobsGroup } from "./jobs.js";
 
 const CURRENT_YEAR = 2026;
 const ESTIMATE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const UPLOAD_LINK_TTL_MS = 2 * 60 * 60 * 1000;
 
 function calculatorUrl(requestCode, token, workerOrigin, env) {
   if (!token || !env.CALCULATOR_URL) return "";
@@ -56,6 +57,8 @@ export async function handleCreateRequest(request, env, headers) {
   const notes        = str(body.notes,            { max: 500 });
   const estimateToken = crypto.randomUUID().replaceAll("-", "");
   const estimateTokenExpiresAt = new Date(Date.now() + ESTIMATE_LINK_TTL_MS).toISOString();
+  const uploadToken = crypto.randomUUID().replaceAll("-", "");
+  const uploadTokenExpiresAt = new Date(Date.now() + UPLOAD_LINK_TTL_MS).toISOString();
 
   let requestId, requestCode, clientId = null;
 
@@ -89,14 +92,16 @@ export async function handleCreateRequest(request, env, headers) {
       INSERT INTO requests (
         request_code, type, type_label, name, phone, location,
         timing, project, consultation_date, source, status, client_id, notes,
-        estimate_token, estimate_token_expires_at
+        estimate_token, estimate_token_expires_at,
+        upload_token, upload_token_expires_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?, ?, ?, ?, ?)
     `).bind(
       requestCode, type, typeLabel, name, normalizedPhone,
       location || null, timing || null, project || null,
       consultation || null, source, clientId, notes || null,
-      estimateToken, estimateTokenExpiresAt
+      estimateToken, estimateTokenExpiresAt,
+      uploadToken, uploadTokenExpiresAt
     ).run();
 
     if (!insertResult.meta?.last_row_id) {
@@ -153,6 +158,7 @@ export async function handleCreateRequest(request, env, headers) {
       client_id: clientId,
       status: "new",
       status_label: statusLabel("new"),
+      upload_token: uploadToken,
     },
   }, headers);
 }
