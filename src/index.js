@@ -6,6 +6,7 @@ import { createRouter } from "./lib/router.js";
 import { handleHealth } from "./handlers/health.js";
 import {
   handleCreateRequest,
+  handleGetCalculatorRequest,
   handleListRequests,
   handleGetRequest,
   handleUpdateStatus,
@@ -25,23 +26,24 @@ import {
 } from "./handlers/files.js";
 
 const PUBLIC_ROUTES = [
-  ["GET",  /^\/$/,                 handleHealth,          { auth: false }],
-  ["POST", /^\/$/,                 handleCreateRequest,   { auth: false }],
-  ["POST", /^\/telegram-webhook$/, handleTelegramWebhook, { auth: false }],
-  ["POST", /^\/jobs-webhook$/,     handleJobsWebhook,     { auth: false }],
+  ["GET",  /^\/$/,                              handleHealth,               { auth: false }],
+  ["POST", /^\/$/,                              handleCreateRequest,        { auth: false }],
+  ["GET",  /^\/calculator-request\/([^/]+)$/,  handleGetCalculatorRequest, { auth: false }],
+  ["POST", /^\/telegram-webhook$/,              handleTelegramWebhook,      { auth: false }],
+  ["POST", /^\/jobs-webhook$/,                  handleJobsWebhook,          { auth: false }],
 ];
 
 const ADMIN_ROUTES = [
   ["GET",   /^\/requests$/,                     handleListRequests,  { auth: true }],
   ["GET",   /^\/request\/([^/]+)$/,             handleGetRequest,    { auth: true }],
-  ["POST",  /^\/request\/([^/]+)\/status$/,     handleUpdateStatus,  { auth: true }],
+  ["POST",  /^\/request\/([^/]+)\/status$/,     handleUpdateStatus, { auth: true }],
   ["GET",   /^\/request\/([^/]+)\/events$/,     handleGetEvents,     { auth: true }],
-  ["POST",  /^\/request\/([^/]+)\/client$/,     handleAttachClient,  { auth: true }],
+  ["POST",  /^\/request\/([^/]+)\/client$/,     handleAttachClient, { auth: true }],
   ["GET",   /^\/object\/([^/]+)$/,              handleGetObject,     { auth: true }],
-  ["PATCH", /^\/object\/([^/]+)$/,              handleUpdateObject,  { auth: true }],
-  ["POST",  /^\/object\/([^/]+)\/file$/,        handleUploadFile,    { auth: true }],
-  ["GET",   /^\/object\/([^/]+)\/files$/,       handleListFiles,     { auth: true }],
-  ["GET",   /^\/object\/([^/]+)\/file\/(\d+)$/, handleDownloadFile,  { auth: true }],
+  ["PATCH", /^\/object\/([^/]+)$/,              handleUpdateObject, { auth: true }],
+  ["POST",  /^\/object\/([^/]+)\/file$/,        handleUploadFile,   { auth: true }],
+  ["GET",   /^\/object\/([^/]+)\/files$/,       handleListFiles,    { auth: true }],
+  ["GET",   /^\/object\/([^/]+)\/file\/(\d+)$/, handleDownloadFile, { auth: true }],
 ];
 
 const routePublic = createRouter(PUBLIC_ROUTES);
