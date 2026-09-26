@@ -13,3 +13,4 @@ bucket_name = "sa-master-files"
 
 [vars]
 ENVIRONMENT = "production"
+CALCULATOR_URL = "https://sa-master.pro/calculator.html"
