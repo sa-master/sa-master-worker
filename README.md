@@ -1,29 +1,40 @@
-# SA-MASTER Worker
+SA-MASTER — проєкт у заявці з сайту
 
-Cloudflare Worker для обробки заявок сайту sa-master.pro.
+Що робить оновлення
+1. Для типу «Прорахунок» після номера телефону сайт питає:
+   • чи потрібна консультація;
+   • чи є дизайн-проєкт;
+   • за потреби дає обрати файл;
+   • коли планується початок робіт.
+2. Заявка надходить у Telegram як раніше.
+3. Прикріплений файл надходить у Telegram окремим документом із номером заявки.
+4. «🧮 Прорахувати» і далі відкриває калькулятор та створює об’єкт у «Прорахунку».
 
-## Стек
-- Cloudflare Workers
-- D1 (SQLite)
-- R2 (файли)
-- Telegram Bot API
+Порядок встановлення
 
-## Структура
-- `src/index.js` — entry, роутер
-- `src/lib/` — утиліти
-- `src/handlers/` — обробники маршрутів
+КРОК 1. D1 — один раз
+У Cloudflare → Workers & Pages → sa-master-worker → D1 → sa-master-db → Console
+виконай вміст файлу 006_add_request_project_upload.sql.
 
-## Секрети
-- `BOT_TOKEN` — Telegram bot token
-- `CHAT_ID` — Telegram chat id
-- `ADMIN_TOKEN` — Bearer-токен для адмінки
+Важливо: цей SQL можна виконати лише один раз. Повторний запуск покаже помилку про вже наявну колонку — це не поломка.
 
-## Деплой
-```bash
-npx wrangler deploy
-```
+КРОК 2. GitHub: Worker
+Замінити в репозиторії:
+• src/handlers/requests.js — requests.js.txt
+• src/handlers/files.js — files.js.txt
+• src/lib/telegram.js — telegram.js.txt
+• src/index.js — index.js.txt
 
-## Міграції D1
-```bash
-npx wrangler d1 execute sa-master-db --file=./schema.sql --remote
-```
+Додати новий файл:
+• migrations/006_add_request_project_upload.sql — вміст однойменного файлу.
+
+КРОК 3. GitHub: сайт
+• У app.js замінити рівно блок «Чат-заявка» за інструкцією у app.js-chat-block.txt.
+• У самий кінець style.css вставити вміст style-project-upload-addition.txt.
+
+КРОК 4. Перевірка
+1. Зайди на сайт у звичайному вікні браузера.
+2. Натисни «Залишити заявку» → «Прорахунок».
+3. Вкажи ім’я, телефон, «Так, потрібна», «Є проєкт».
+4. Вибери PDF або фото до 25 МБ, вкажи початок робіт і надішли.
+5. У Telegram повинні прийти: картка заявки та окремий документ «Проєкт до заявки …».
