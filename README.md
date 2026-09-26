@@ -19,7 +19,7 @@ SA-MASTER — проєкт у заявці з сайту
 Важливо: цей SQL можна виконати лише один раз. Повторний запуск покаже помилку про вже наявну колонку — це не поломка.
 
 КРОК 2. GitHub: Worker
-Замінити в репозиторії:
+Усі наведені нижче файли є ПОВНИМИ. Замінити в репозиторії:
 • src/handlers/requests.js — requests.js.txt
 • src/handlers/files.js — files.js.txt
 • src/lib/telegram.js — telegram.js.txt
@@ -29,8 +29,9 @@ SA-MASTER — проєкт у заявці з сайту
 • migrations/006_add_request_project_upload.sql — вміст однойменного файлу.
 
 КРОК 3. GitHub: сайт
-• У app.js замінити рівно блок «Чат-заявка» за інструкцією у app.js-chat-block.txt.
-• У самий кінець style.css вставити вміст style-project-upload-addition.txt.
+Замінити повністю:
+• app.js — app.js.txt
+• style.css — style.css.txt
 
 КРОК 4. Перевірка
 1. Зайди на сайт у звичайному вікні браузера.
