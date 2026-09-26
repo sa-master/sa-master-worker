@@ -15,22 +15,21 @@ import {
   handleTelegramWebhook,
 } from "./handlers/requests.js";
 import { handleJobsWebhook } from "./handlers/jobs.js";
+import { handleGetObject, handleUpdateObject } from "./handlers/objects.js";
 import {
-  handleGetObject,
-  handleUpdateObject,
-} from "./handlers/objects.js";
-import {
+  handleUploadRequestProject,
   handleUploadFile,
   handleListFiles,
   handleDownloadFile,
 } from "./handlers/files.js";
 
 const PUBLIC_ROUTES = [
-  ["GET",  /^\/$/,                              handleHealth,               { auth: false }],
-  ["POST", /^\/$/,                              handleCreateRequest,        { auth: false }],
-  ["GET",  /^\/calculator-request\/([^/]+)$/,  handleGetCalculatorRequest, { auth: false }],
-  ["POST", /^\/telegram-webhook$/,              handleTelegramWebhook,      { auth: false }],
-  ["POST", /^\/jobs-webhook$/,                  handleJobsWebhook,          { auth: false }],
+  ["GET",  /^\/$/,                            handleHealth,               { auth: false }],
+  ["POST", /^\/$/,                            handleCreateRequest,        { auth: false }],
+  ["GET",  /^\/calculator-request\/([^/]+)$/, handleGetCalculatorRequest, { auth: false }],
+  ["POST", /^\/request\/([^/]+)\/project$/,   handleUploadRequestProject, { auth: false }],
+  ["POST", /^\/telegram-webhook$/,            handleTelegramWebhook,      { auth: false }],
+  ["POST", /^\/jobs-webhook$/,                handleJobsWebhook,          { auth: false }],
 ];
 
 const ADMIN_ROUTES = [
@@ -47,26 +46,22 @@ const ADMIN_ROUTES = [
 ];
 
 const routePublic = createRouter(PUBLIC_ROUTES);
-const routeAdmin  = createRouter(ADMIN_ROUTES);
+const routeAdmin = createRouter(ADMIN_ROUTES);
 
 export default {
   async fetch(request, env, ctx) {
     if (request.method === "OPTIONS") return preflight();
-
     const headers = corsHeaders();
     const url = new URL(request.url);
-
     try {
       const pub = await routePublic(request, url);
       if (pub) return await pub.handler(request, env, headers, pub.params, url, ctx);
-
       const admin = await routeAdmin(request, url);
       if (admin) {
         const authError = requireAuth(request, env, headers);
         if (authError) return authError;
         return await admin.handler(request, env, headers, admin.params, url, ctx);
       }
-
       return error("Not found", headers, 404);
     } catch (err) {
       console.error("Unhandled error:", err);
