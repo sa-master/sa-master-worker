@@ -1,14 +1,15 @@
 import { STATUS_LABELS } from "./statuses.js";
 
 /* Побудувати inline-клавіатуру залежно від поточного статусу */
-export function buildStatusButtons(requestCode, status) {
+export function buildStatusButtons(requestCode, status, calculatorUrl = "") {
   const details = { text: "👁 Деталі", callback_data: `details:${requestCode}` };
-
   const row2 = [];
   const row3 = [];
 
   if (status === "new" || status === "processing" || status === "estimate") {
-    row2.push({ text: "✅ Погоджено", callback_data: `status:${requestCode}:approved` });
+    if (calculatorUrl) {
+      row2.push({ text: "🧮 Прорахувати", url: calculatorUrl });
+    }
     row3.push({ text: "❌ Відмова", callback_data: `status:${requestCode}:cancelled` });
   } else if (status === "approved" || status === "scheduled") {
     row2.push({ text: "🔧 У роботі", callback_data: `status:${requestCode}:installation` });
@@ -23,7 +24,6 @@ export function buildStatusButtons(requestCode, status) {
   const keyboard = [[details]];
   if (row2.length) keyboard.push(row2);
   if (row3.length) keyboard.push(row3);
-
   return keyboard;
 }
 
@@ -56,7 +56,7 @@ export function formatRequestText(req, { compact = false } = {}) {
 
   const lines = [
     `🏠 ЗАЯВКА ${req.request_code}`,
-    ``,
+    "",
     `👤 Ім'я: ${req.name || "—"}`,
     `📞 Телефон: ${req.phone || "—"}`,
     `🔧 Тип: ${req.type_label || req.type || "—"}`,
@@ -67,9 +67,7 @@ export function formatRequestText(req, { compact = false } = {}) {
   if (req.timing)            lines.push(`🗓 Початок: ${req.timing}`);
   if (req.consultation_date) lines.push(`📅 Консультація: ${req.consultation_date}`);
   if (req.source)            lines.push(`🔗 Джерело: ${req.source}`);
-
   lines.push(`📊 Статус: ${STATUS_LABELS[req.status] || req.status}`);
-
   return lines.join("\n");
 }
 
