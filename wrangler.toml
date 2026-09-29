@@ -14,3 +14,10 @@ bucket_name = "sa-master-files"
 [vars]
 ENVIRONMENT = "production"
 CALCULATOR_URL = "https://sa-master.pro/calculator.html"
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
