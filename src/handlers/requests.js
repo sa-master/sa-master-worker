@@ -36,9 +36,48 @@ const UPLOAD_LINK_TTL_MS = 2 * 60 * 60 * 1000;
 
 function adminMasterStatusLabel(status) {
   if (status === "active") return "🟢 Активний";
+  if (status === "inactive") return "⚪ Неактивний";
   if (status === "blocked") return "🔴 Заблокований";
-  if (status === "archived") return "⚫ В архіві";
   return `⚪ ${status || "невідомо"}`;
+}
+
+function adminMasterStatusIcon(status) {
+  if (status === "active") return "🟢";
+  if (status === "blocked") return "🔴";
+  return "⚪";
+}
+
+function telegramMemberIsActive(member) {
+  const status = member?.result?.status || "";
+  return (
+    status === "member" ||
+    status === "administrator" ||
+    status === "creator" ||
+    (status === "restricted" && member?.result?.is_member)
+  );
+}
+
+async function syncMasterStatusFromTelegram(env, master, member) {
+  if (!master || master.status === "blocked" || !member?.ok) {
+    return master;
+  }
+
+  const nextStatus = telegramMemberIsActive(member)
+    ? "active"
+    : "inactive";
+
+  if (master.status !== nextStatus) {
+    await env.DB.prepare(`
+      UPDATE masters
+      SET status = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+        AND status != 'blocked'
+    `).bind(nextStatus, master.id).run();
+
+    master.status = nextStatus;
+  }
+
+  return master;
 }
 
 async function getAdminMaster(env, masterId) {
@@ -61,8 +100,8 @@ async function sendMastersMenu(env) {
     ORDER BY
       CASE status
         WHEN 'active' THEN 1
-        WHEN 'blocked' THEN 2
-        WHEN 'archived' THEN 3
+        WHEN 'inactive' THEN 2
+        WHEN 'blocked' THEN 3
         ELSE 4
       END,
       id DESC
@@ -80,7 +119,7 @@ async function sendMastersMenu(env) {
   }
 
   const buttons = masters.map((m) => [{
-    text: `${m.status === "active" ? "🟢" : m.status === "blocked" ? "🔴" : "⚫"} ${m.first_name || m.username || `Майстер #${m.id}`}`,
+    text: `${adminMasterStatusIcon(m.status)} ${m.first_name || m.username || `Майстер #${m.id}`}`,
     callback_data: `master_open:${m.id}`,
   }]);
 
@@ -111,7 +150,10 @@ async function showMasterCard(env, callbackId, masterId) {
     tgStatus = member?.ok
       ? (member.result?.status || "—")
       : `помилка: ${member?.description || "невідомо"}`;
-  } catch {
+
+    await syncMasterStatusFromTelegram(env, master, member);
+  } catch (err) {
+    console.error("Master Telegram status sync failed:", err);
     tgStatus = "помилка перевірки";
   }
 
@@ -134,19 +176,13 @@ async function showMasterCard(env, callbackId, masterId) {
 
   const buttons = [];
 
-  if (master.status === "active") {
+  if (master.status === "active" || master.status === "inactive") {
     buttons.push([
       { text: "🚫 Заблокувати", callback_data: `master_block:${master.id}` },
-      { text: "⚫ В архів", callback_data: `master_archive:${master.id}` },
     ]);
   } else if (master.status === "blocked") {
     buttons.push([
       { text: "✅ Розблокувати", callback_data: `master_unblock:${master.id}` },
-      { text: "⚫ В архів", callback_data: `master_archive:${master.id}` },
-    ]);
-  } else if (master.status === "archived") {
-    buttons.push([
-      { text: "♻️ Відновити", callback_data: `master_restore:${master.id}` },
     ]);
   }
 
@@ -240,7 +276,7 @@ async function unblockMaster(env, callbackId, masterId) {
   try {
     await env.DB.prepare(`
       UPDATE masters
-      SET status = 'active', updated_at = CURRENT_TIMESTAMP
+      SET status = 'inactive', updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).bind(master.id).run();
   } catch (err) {
@@ -263,89 +299,14 @@ async function unblockMaster(env, callbackId, masterId) {
       [
         "✅ ДОСТУП ДО SA-MASTER Jobs ВІДНОВЛЕНО",
         "",
-        "Ваш профіль знову активний.",
+        "Ваш профіль розблоковано.",
+        "Зараз статус профілю: ⚪ Неактивний.",
         "Відкрийте бота /start та отримайте нове запрошення до групи заявок.",
       ].join("\n")
     );
   } catch (err) {
     console.error("Unblocked master notification failed:", err);
   }
-}
-
-async function archiveMaster(env, callbackId, masterId) {
-  const master = await getAdminMaster(env, masterId);
-
-  if (!master) {
-    await answerCallbackQuery(env, callbackId, "❌ Майстра не знайдено", true);
-    return;
-  }
-
-  const ban = await banMasterFromJobsGroup(env, master.telegram_id);
-
-  if (!ban?.ok) {
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      `❌ Telegram: ${ban?.description || "не вдалося закрити доступ"}`,
-      true
-    );
-    return;
-  }
-
-  try {
-    await env.DB.prepare(`
-      UPDATE masters
-      SET status = 'archived', updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).bind(master.id).run();
-  } catch (err) {
-    console.error("Archive master failed:", err);
-    await unbanMasterFromJobsGroup(env, master.telegram_id);
-    await answerCallbackQuery(env, callbackId, "❌ Не вдалося архівувати", true);
-    return;
-  }
-
-  await answerCallbackQuery(env, callbackId, "⚫ Майстра перенесено в архів", true);
-}
-
-async function restoreMaster(env, callbackId, masterId) {
-  const master = await getAdminMaster(env, masterId);
-
-  if (!master) {
-    await answerCallbackQuery(env, callbackId, "❌ Майстра не знайдено", true);
-    return;
-  }
-
-  const unban = await unbanMasterFromJobsGroup(env, master.telegram_id);
-
-  if (!unban?.ok) {
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      `❌ Telegram: ${unban?.description || "не вдалося відновити доступ"}`,
-      true
-    );
-    return;
-  }
-
-  try {
-    await env.DB.prepare(`
-      UPDATE masters
-      SET status = 'active', updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `).bind(master.id).run();
-  } catch (err) {
-    console.error("Restore master failed:", err);
-    await answerCallbackQuery(env, callbackId, "❌ Не вдалося відновити профіль", true);
-    return;
-  }
-
-  await answerCallbackQuery(
-    env,
-    callbackId,
-    "♻️ Профіль відновлено. Майстер може отримати нове запрошення.",
-    true
-  );
 }
 
 /* =========================================================
@@ -967,20 +928,6 @@ export async function handleTelegramWebhook(request, env, headers) {
   if (data.startsWith("master_unblock:")) {
     const masterId = Number(data.slice(15));
     await unblockMaster(env, cq.id, masterId);
-    await showMasterCard(env, cq.id, masterId);
-    return json({ ok: true }, headers);
-  }
-
-  if (data.startsWith("master_archive:")) {
-    const masterId = Number(data.slice(15));
-    await archiveMaster(env, cq.id, masterId);
-    await showMasterCard(env, cq.id, masterId);
-    return json({ ok: true }, headers);
-  }
-
-  if (data.startsWith("master_restore:")) {
-    const masterId = Number(data.slice(15));
-    await restoreMaster(env, cq.id, masterId);
     await showMasterCard(env, cq.id, masterId);
     return json({ ok: true }, headers);
   }
