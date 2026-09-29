@@ -6,55 +6,8 @@ import {
 } from "../lib/telegram-jobs.js";
 import { sendMessageWithButtons, editMessageText } from "../lib/telegram.js";
 
-/* =========================================================
- * /start або /join — показуємо опис сервісу + кнопку
- * ========================================================= */
+/* Запуск анкети */
 export async function handleJoinStart(env, headers, chatId, fromUser) {
-  const existing = await env.DB.prepare(`
-    SELECT id, status FROM master_applications
-    WHERE telegram_id = ? ORDER BY id DESC LIMIT 1
-  `).bind(fromUser.id).first();
-
-  if (existing && existing.status === "pending") {
-    await sendToMaster(env, chatId, "⏳ Ваша анкета вже на розгляді. Зачекайте, будь ласка.");
-    return json({ ok: true }, headers);
-  }
-
-  const isMaster = await env.DB.prepare(`
-    SELECT id FROM masters WHERE telegram_id = ? LIMIT 1
-  `).bind(fromUser.id).first();
-
-  if (isMaster) {
-    await sendToMaster(env, chatId, "✅ Ви вже зареєстровані як майстер.");
-    return json({ ok: true }, headers);
-  }
-
-  const welcomeText = [
-    "👋 Вітаємо в SA-MASTER.PRO!",
-    "",
-    "Ми — платформа, яка з'єднує майстрів з клієнтами.",
-    "Тут ви отримуєте реальні замовлення на ремонт, оздоблення та інші роботи.",
-    "",
-    "🔧 Що ви отримуєте:",
-    "• Реальні заявки від клієнтів",
-    "• Прозорі умови співпраці",
-    "• Підтримку на всіх етапах",
-    "",
-    "👇 Якщо готові приєднатися — натисніть кнопку нижче, щоб заповнити анкету.",
-  ].join("\n");
-
-  const buttons = [
-    [{ text: "✅ Долучитись", callback_data: "join_apply" }],
-  ];
-
-  await sendMessageWithButtons(env, welcomeText, buttons, chatId);
-  return json({ ok: true }, headers);
-}
-
-/* =========================================================
- * Запуск анкети після натискання кнопки «Долучитись»
- * ========================================================= */
-export async function handleJoinApply(env, headers, chatId, fromUser) {
   const existing = await env.DB.prepare(`
     SELECT id, status FROM master_applications
     WHERE telegram_id = ? ORDER BY id DESC LIMIT 1
@@ -88,9 +41,7 @@ export async function handleJoinApply(env, headers, chatId, fromUser) {
   return json({ ok: true }, headers);
 }
 
-/* =========================================================
- * Обробка текстової відповіді в анкеті
- * ========================================================= */
+/* Обробка текстової відповіді в анкеті */
 export async function handleJoinMessage(env, headers, chatId, fromUser, text) {
   const app = await env.DB.prepare(`
     SELECT * FROM master_applications
@@ -197,9 +148,7 @@ export async function handleJoinMessage(env, headers, chatId, fromUser, text) {
   return json({ ok: true }, headers);
 }
 
-/* =========================================================
- * Обробка підтвердження/відхилення анкети адміном
- * ========================================================= */
+/* Обробка підтвердження/відхилення анкети адміном */
 export async function handleApplicationReview(env, headers, appId, action, cq) {
   const app = await env.DB.prepare(`
     SELECT * FROM master_applications WHERE id = ?
@@ -210,6 +159,7 @@ export async function handleApplicationReview(env, headers, appId, action, cq) {
     return json({ ok: true }, headers);
   }
 
+  /* Перевірка: чи вже оброблено */
   if (app.status !== "pending") {
     await answerJobsCallback(env, cq.id, `⚠️ Вже оброблено: ${app.status}`, true);
     return json({ ok: true }, headers);
@@ -228,6 +178,7 @@ export async function handleApplicationReview(env, headers, appId, action, cq) {
 
     await sendToMaster(env, app.telegram_id, "❌ На жаль, вашу анкету відхилено. Дякуємо за інтерес!");
 
+    /* Оновлюємо повідомлення */
     const rejectedText = [
       "❌ АНКЕТУ ВІДХИЛЕНО",
       `👤 ${app.first_name}`,
@@ -266,6 +217,7 @@ export async function handleApplicationReview(env, headers, appId, action, cq) {
     app.id
   ).run();
 
+  /* Генеруємо посилання */
   const invite = await createInviteLink(env);
 
   if (invite && invite.ok && invite.result?.invite_link) {
@@ -282,6 +234,7 @@ export async function handleApplicationReview(env, headers, appId, action, cq) {
     );
   }
 
+  /* Оновлюємо повідомлення в адміна */
   const approvedText = [
     "✅ АНКЕТУ ПРИЙНЯТО",
     `👤 ${app.first_name}`,
