@@ -25,8 +25,18 @@ import {
 
 /* =========================================================
  * TEMP DEBUG: GET /debug/jobs-group
+ *
  * Тимчасово публічний маршрут для діагностики.
- * Після перевірки його треба видалити.
+ *
+ * Перевіряє:
+ * 1. групу;
+ * 2. статус користувача ДО розблокування;
+ * 3. якщо status = kicked — виконує unbanChatMember;
+ * 4. статус користувача ПІСЛЯ розблокування;
+ * 5. якщо користувач більше не kicked — створює нове
+ *    одноразове персональне запрошення.
+ *
+ * Після завершення діагностики цей маршрут треба видалити.
  * ========================================================= */
 
 const TELEGRAM_API = "https://api.telegram.org";
@@ -83,31 +93,94 @@ async function handleJobsGroupDebug(request, env, headers, params, url) {
     return json(result, headers, 500);
   }
 
-  result.checks.get_chat = await jobsApi(env, "getChat", {
-    chat_id: env.JOBS_CHAT_ID,
-  });
+  if (!telegramId) {
+    result.ok = false;
+    result.error = "Не передано telegram_id";
+    return json(result, headers, 400);
+  }
 
-  if (telegramId) {
-    result.checks.get_chat_member = await jobsApi(env, "getChatMember", {
+  /* 1. Перевіряємо групу */
+  result.checks.get_chat = await jobsApi(
+    env,
+    "getChat",
+    {
+      chat_id: env.JOBS_CHAT_ID,
+    }
+  );
+
+  /* 2. Статус користувача ДО розблокування */
+  const memberBefore = await jobsApi(
+    env,
+    "getChatMember",
+    {
       chat_id: env.JOBS_CHAT_ID,
       user_id: telegramId,
-    });
+    }
+  );
+
+  result.checks.member_before = memberBefore;
+
+  /* 3. Якщо kicked — розблоковуємо */
+  if (
+    memberBefore?.ok &&
+    memberBefore.result?.status === "kicked"
+  ) {
+    const unban = await jobsApi(
+      env,
+      "unbanChatMember",
+      {
+        chat_id: env.JOBS_CHAT_ID,
+        user_id: telegramId,
+        only_if_banned: true,
+      }
+    );
+
+    result.checks.unban = unban;
   } else {
-    result.checks.get_chat_member = {
-      ok: false,
+    result.checks.unban = {
       skipped: true,
-      description: "Додайте ?telegram_id=TELEGRAM_ID другого акаунта",
+      description: "Користувач не має статусу kicked",
     };
   }
 
-  result.checks.create_invite_link = await jobsApi(
+  /* 4. Перевіряємо статус ПІСЛЯ розблокування */
+  const memberAfter = await jobsApi(
     env,
-    "createChatInviteLink",
+    "getChatMember",
     {
       chat_id: env.JOBS_CHAT_ID,
-      name: `DEBUG ${Date.now()}`.slice(0, 32),
+      user_id: telegramId,
     }
   );
+
+  result.checks.member_after = memberAfter;
+
+  /*
+   * 5. Створюємо нове запрошення тільки якщо
+   * користувач уже не kicked.
+   */
+  if (
+    memberAfter?.ok &&
+    memberAfter.result?.status !== "kicked"
+  ) {
+    result.checks.create_invite_link =
+      await jobsApi(
+        env,
+        "createChatInviteLink",
+        {
+          chat_id: env.JOBS_CHAT_ID,
+          member_limit: 1,
+          name: `DEBUG ${Date.now()}`.slice(0, 32),
+        }
+      );
+  } else {
+    result.checks.create_invite_link = {
+      ok: false,
+      skipped: true,
+      description:
+        "Запрошення не створено, тому що користувач досі kicked",
+    };
+  }
 
   return json(result, headers);
 }
