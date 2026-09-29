@@ -83,7 +83,6 @@ export async function sendToMaster(env, chatId, text, inlineKeyboard) {
   return callJobsBot(env, "sendMessage", payload);
 }
 
-/* Перевірити статус користувача саме у групі JOBS_CHAT_ID */
 export async function getJobsChatMember(env, telegramId) {
   if (!env.JOBS_CHAT_ID) {
     return { ok: false, description: "JOBS_CHAT_ID не встановлено" };
@@ -95,10 +94,6 @@ export async function getJobsChatMember(env, telegramId) {
   });
 }
 
-/*
- * Якщо Telegram повертає status="kicked", користувач забанений
- * і не зможе повернутися через invite link, доки його не розбанити.
- */
 export async function ensureJobsGroupAccess(env, telegramId) {
   const member = await getJobsChatMember(env, telegramId);
 
@@ -136,15 +131,19 @@ export async function ensureJobsGroupAccess(env, telegramId) {
   return {
     ok: true,
     status,
+    is_member: !!member.result?.is_member,
     was_unbanned: false,
   };
 }
 
 /*
- * Нове персональне запрошення:
- * - без expire_date;
- * - максимум для 1 учасника;
- * - кожен виклик створює нове посилання.
+ * Персональне запрошення.
+ *
+ * ВАЖЛИВО:
+ * member_limit навмисно НЕ використовується.
+ * Telegram може вважати одноразове invite-посилання використаним
+ * після попередньої спроби/входу. Для нашого сценарію достатньо
+ * створювати нове унікальне посилання на кожний запит майстра.
  */
 export async function createInviteLink(env) {
   if (!env.JOBS_CHAT_ID) {
@@ -153,7 +152,6 @@ export async function createInviteLink(env) {
 
   const result = await callJobsBot(env, "createChatInviteLink", {
     chat_id: env.JOBS_CHAT_ID,
-    member_limit: 1,
     name: `SA-MASTER ${Date.now()}`.slice(0, 32),
   });
 
@@ -169,13 +167,6 @@ export async function createInviteLink(env) {
   return result;
 }
 
-/*
- * Єдина функція для видачі посилання конкретному майстру:
- * 1. перевіряє статус у групі;
- * 2. якщо kicked — розбанює;
- * 3. якщо вже member/admin/creator — повідомляє, що він уже в групі;
- * 4. якщо left — створює нове invite link.
- */
 export async function createInviteForMaster(env, telegramId) {
   const access = await ensureJobsGroupAccess(env, telegramId);
 
@@ -187,7 +178,7 @@ export async function createInviteForMaster(env, telegramId) {
     access.status === "member" ||
     access.status === "administrator" ||
     access.status === "creator" ||
-    (access.status === "restricted" && access.result?.is_member)
+    (access.status === "restricted" && access.is_member)
   ) {
     return {
       ok: true,
