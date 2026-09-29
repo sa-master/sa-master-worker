@@ -7,7 +7,7 @@ import {
 } from "../lib/telegram-jobs.js";
 import { sendTelegram } from "../lib/telegram.js";
 import { buildMasterOutcomeButtons } from "../lib/telegram-buttons.js";
-import { handleJoinStart, handleJoinApply, handleJoinMessage, handleApplicationReview } from "./join.js";
+import { handleJoinStart, handleJoinMessage, handleApplicationReview } from "./join.js";
 
 /* =========================================================
  * Публікація заявки в групу майстрів
@@ -39,16 +39,17 @@ export async function handleJobsWebhook(request, env, headers) {
     const chatId = msg.chat.id;
     const fromUser = msg.from;
     const text = String(msg.text || "").trim();
-    if (text === "/start" || text.startsWith("/start ")) return handleJoinStart(env, headers, chatId, fromUser);
+    if (text === "/start" || text.startsWith("/start ")) {
+      await sendToMaster(env, chatId, "👋 Вітаю! Я — бот SA-MASTER Jobs.\n\nЩоб подати анкету майстра — напишіть /join.");
+      return json({ ok: true }, headers);
+    }
     if (text === "/join" || text.startsWith("/join ")) return handleJoinStart(env, headers, chatId, fromUser);
     return handleJoinMessage(env, headers, chatId, fromUser, text);
   }
 
   if (update.callback_query) {
     const cq = update.callback_query;
-    const chatId = cq.message?.chat?.id;
     const data = String(cq.data || "");
-    if (data === "join_apply") return handleJoinApply(env, headers, chatId, cq.from);
     if (data.startsWith("take:")) return handleTakeJob(env, headers, data.slice(5), cq);
     if (data.startsWith("outcome:")) {
       const [, requestCode, outcome] = data.split(":");
@@ -78,7 +79,7 @@ async function handleTakeJob(env, headers, requestCode, cq) {
 
   const registeredMaster = await env.DB.prepare(`SELECT id, status FROM masters WHERE telegram_id = ? LIMIT 1`).bind(masterId).first();
   if (!registeredMaster || registeredMaster.status !== "active") {
-    await answerJobsCallback(env, cq.id, "❌ Ви не зареєстровані. Напишіть /start у приватний чат бота.", true);
+    await answerJobsCallback(env, cq.id, "❌ Ви не зареєстровані. Напишіть /join у приватний чат бота.", true);
     return json({ ok: true }, headers);
   }
 
