@@ -6,59 +6,32 @@ function apiUrl(env, method) {
 
 async function callJobsBot(env, method, payload) {
   if (!env.JOBS_BOT_TOKEN) {
-    return {
-      ok: false,
-      description: "JOBS_BOT_TOKEN не встановлено",
-    };
+    return { ok: false, description: "JOBS_BOT_TOKEN не встановлено" };
   }
 
   try {
     const res = await fetch(apiUrl(env, method), {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
 
     const data = await res.json();
 
     if (!data.ok) {
-      console.error(
-        `Jobs bot ${method} failed:`,
-        data.description || data
-      );
+      console.error(`Jobs bot ${method} failed:`, data.description || data);
     }
 
     return data;
   } catch (err) {
-    console.error(
-      `Jobs bot ${method} error:`,
-      err
-    );
-
-    return {
-      ok: false,
-      description: String(err?.message || err),
-    };
+    console.error(`Jobs bot ${method} error:`, err);
+    return { ok: false, description: String(err?.message || err) };
   }
 }
 
-/* =========================================================
- * Відправити повідомлення в групу майстрів
- * ========================================================= */
-
-export async function sendToJobsGroup(
-  env,
-  text,
-  inlineKeyboard,
-  threadId
-) {
+export async function sendToJobsGroup(env, text, inlineKeyboard, threadId) {
   if (!env.JOBS_CHAT_ID) {
-    return {
-      ok: false,
-      description: "JOBS_CHAT_ID не встановлено",
-    };
+    return { ok: false, description: "JOBS_CHAT_ID не встановлено" };
   }
 
   const payload = {
@@ -67,38 +40,15 @@ export async function sendToJobsGroup(
     disable_web_page_preview: true,
   };
 
-  if (inlineKeyboard) {
-    payload.reply_markup = {
-      inline_keyboard: inlineKeyboard,
-    };
-  }
+  if (inlineKeyboard) payload.reply_markup = { inline_keyboard: inlineKeyboard };
+  if (threadId) payload.message_thread_id = threadId;
 
-  if (threadId) {
-    payload.message_thread_id = threadId;
-  }
-
-  return callJobsBot(
-    env,
-    "sendMessage",
-    payload
-  );
+  return callJobsBot(env, "sendMessage", payload);
 }
 
-/* =========================================================
- * Оновити повідомлення в групі
- * ========================================================= */
-
-export async function editJobsMessage(
-  env,
-  messageId,
-  text,
-  inlineKeyboard
-) {
+export async function editJobsMessage(env, messageId, text, inlineKeyboard) {
   if (!env.JOBS_CHAT_ID) {
-    return {
-      ok: false,
-      description: "JOBS_CHAT_ID не встановлено",
-    };
+    return { ok: false, description: "JOBS_CHAT_ID не встановлено" };
   }
 
   const payload = {
@@ -108,146 +58,160 @@ export async function editJobsMessage(
     disable_web_page_preview: true,
   };
 
-  if (inlineKeyboard) {
-    payload.reply_markup = {
-      inline_keyboard: inlineKeyboard,
-    };
-  }
+  if (inlineKeyboard) payload.reply_markup = { inline_keyboard: inlineKeyboard };
 
-  return callJobsBot(
-    env,
-    "editMessageText",
-    payload
-  );
+  return callJobsBot(env, "editMessageText", payload);
 }
 
-/* =========================================================
- * Відповісти на callback
- * ========================================================= */
-
-export async function answerJobsCallback(
-  env,
-  callbackQueryId,
-  text,
-  showAlert = false
-) {
-  return callJobsBot(
-    env,
-    "answerCallbackQuery",
-    {
-      callback_query_id: callbackQueryId,
-      text: text || "",
-      show_alert: !!showAlert,
-    }
-  );
+export async function answerJobsCallback(env, callbackQueryId, text, showAlert = false) {
+  return callJobsBot(env, "answerCallbackQuery", {
+    callback_query_id: callbackQueryId,
+    text: text || "",
+    show_alert: !!showAlert,
+  });
 }
 
-/* =========================================================
- * Надіслати повідомлення майстру
- * ========================================================= */
-
-export async function sendToMaster(
-  env,
-  chatId,
-  text,
-  inlineKeyboard
-) {
+export async function sendToMaster(env, chatId, text, inlineKeyboard) {
   const payload = {
     chat_id: chatId,
     text,
     disable_web_page_preview: true,
   };
 
-  if (inlineKeyboard) {
-    payload.reply_markup = {
-      inline_keyboard: inlineKeyboard,
-    };
-  }
+  if (inlineKeyboard) payload.reply_markup = { inline_keyboard: inlineKeyboard };
 
-  return callJobsBot(
-    env,
-    "sendMessage",
-    payload
-  );
+  return callJobsBot(env, "sendMessage", payload);
 }
 
-/* =========================================================
- * Створити персональне посилання на групу
- *
- * ВАЖЛИВО:
- * - посилання не має короткого expire_date;
- * - member_limit = 1;
- * - кожен виклик створює НОВЕ посилання;
- * - Telegram API response перевіряється повністю.
- *
- * Таке посилання залишається чинним, доки:
- * 1. ним не скористається одна людина;
- * 2. його не відкличе адміністратор / бот;
- * 3. Telegram не визнає його недійсним з іншої причини.
- * ========================================================= */
+/* Перевірити статус користувача саме у групі JOBS_CHAT_ID */
+export async function getJobsChatMember(env, telegramId) {
+  if (!env.JOBS_CHAT_ID) {
+    return { ok: false, description: "JOBS_CHAT_ID не встановлено" };
+  }
 
+  return callJobsBot(env, "getChatMember", {
+    chat_id: env.JOBS_CHAT_ID,
+    user_id: telegramId,
+  });
+}
+
+/*
+ * Якщо Telegram повертає status="kicked", користувач забанений
+ * і не зможе повернутися через invite link, доки його не розбанити.
+ */
+export async function ensureJobsGroupAccess(env, telegramId) {
+  const member = await getJobsChatMember(env, telegramId);
+
+  if (!member?.ok) {
+    return {
+      ok: false,
+      description: member?.description || "Не вдалося перевірити статус у групі",
+    };
+  }
+
+  const status = member.result?.status || "";
+
+  if (status === "kicked") {
+    const unban = await callJobsBot(env, "unbanChatMember", {
+      chat_id: env.JOBS_CHAT_ID,
+      user_id: telegramId,
+      only_if_banned: true,
+    });
+
+    if (!unban?.ok) {
+      return {
+        ok: false,
+        status,
+        description: unban?.description || "Не вдалося розблокувати користувача",
+      };
+    }
+
+    return {
+      ok: true,
+      status: "left",
+      was_unbanned: true,
+    };
+  }
+
+  return {
+    ok: true,
+    status,
+    was_unbanned: false,
+  };
+}
+
+/*
+ * Нове персональне запрошення:
+ * - без expire_date;
+ * - максимум для 1 учасника;
+ * - кожен виклик створює нове посилання.
+ */
 export async function createInviteLink(env) {
   if (!env.JOBS_CHAT_ID) {
-    return {
-      ok: false,
-      description: "JOBS_CHAT_ID не встановлено",
-    };
+    return { ok: false, description: "JOBS_CHAT_ID не встановлено" };
   }
 
-  const inviteName =
-    `SA-MASTER ${Date.now()}`;
+  const result = await callJobsBot(env, "createChatInviteLink", {
+    chat_id: env.JOBS_CHAT_ID,
+    member_limit: 1,
+    name: `SA-MASTER ${Date.now()}`.slice(0, 32),
+  });
 
-  const result = await callJobsBot(
-    env,
-    "createChatInviteLink",
-    {
-      chat_id: env.JOBS_CHAT_ID,
-
-      /*
-       * Одне посилання = один новий учасник.
-       *
-       * expire_date навмисно НЕ встановлюємо.
-       * Тобто воно не протухає через 24 години.
-       */
-      member_limit: 1,
-
-      name: inviteName,
-    }
-  );
-
-  if (
-    !result?.ok ||
-    !result?.result?.invite_link
-  ) {
-    console.error(
-      "createInviteLink failed:",
-      result
-    );
+  if (!result?.ok || !result?.result?.invite_link) {
+    console.error("createInviteLink failed:", result);
 
     return {
       ok: false,
-      description:
-        result?.description ||
-        "Telegram не повернув invite_link",
+      description: result?.description || "Telegram не повернув invite_link",
     };
   }
-
-  console.log(
-    "New SA-MASTER Jobs invite created:",
-    {
-      name: inviteName,
-      creates_join_request:
-        result.result.creates_join_request,
-      is_revoked:
-        result.result.is_revoked,
-      expire_date:
-        result.result.expire_date,
-      member_limit:
-        result.result.member_limit,
-      pending_join_request_count:
-        result.result.pending_join_request_count,
-    }
-  );
 
   return result;
+}
+
+/*
+ * Єдина функція для видачі посилання конкретному майстру:
+ * 1. перевіряє статус у групі;
+ * 2. якщо kicked — розбанює;
+ * 3. якщо вже member/admin/creator — повідомляє, що він уже в групі;
+ * 4. якщо left — створює нове invite link.
+ */
+export async function createInviteForMaster(env, telegramId) {
+  const access = await ensureJobsGroupAccess(env, telegramId);
+
+  if (!access.ok) {
+    return access;
+  }
+
+  if (
+    access.status === "member" ||
+    access.status === "administrator" ||
+    access.status === "creator" ||
+    (access.status === "restricted" && access.result?.is_member)
+  ) {
+    return {
+      ok: true,
+      already_member: true,
+      status: access.status,
+    };
+  }
+
+  const invite = await createInviteLink(env);
+
+  if (!invite?.ok || !invite?.result?.invite_link) {
+    return {
+      ok: false,
+      status: access.status,
+      description: invite?.description || "Не вдалося створити запрошення",
+    };
+  }
+
+  return {
+    ok: true,
+    already_member: false,
+    was_unbanned: !!access.was_unbanned,
+    status: access.status,
+    invite_link: invite.result.invite_link,
+    invite: invite.result,
+  };
 }
