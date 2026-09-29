@@ -1,5 +1,5 @@
 import { corsHeaders, preflight } from "./lib/cors.js";
-import { error, json } from "./lib/json.js";
+import { error } from "./lib/json.js";
 import { requireAuth } from "./lib/auth.js";
 import { createRouter } from "./lib/router.js";
 
@@ -23,191 +23,26 @@ import {
   handleDownloadFile,
 } from "./handlers/files.js";
 
-/* =========================================================
- * TEMP DEBUG: GET /debug/jobs-group
- *
- * Тимчасово публічний маршрут для діагностики.
- *
- * Перевіряє:
- * 1. групу;
- * 2. статус користувача ДО розблокування;
- * 3. якщо status = kicked — виконує unbanChatMember;
- * 4. статус користувача ПІСЛЯ розблокування;
- * 5. якщо користувач більше не kicked — створює нове
- *    одноразове персональне запрошення.
- *
- * Після завершення діагностики цей маршрут треба видалити.
- * ========================================================= */
-
-const TELEGRAM_API = "https://api.telegram.org";
-
-async function jobsApi(env, method, payload = {}) {
-  if (!env.JOBS_BOT_TOKEN) {
-    return {
-      ok: false,
-      description: "JOBS_BOT_TOKEN не встановлено",
-    };
-  }
-
-  try {
-    const response = await fetch(
-      `${TELEGRAM_API}/bot${env.JOBS_BOT_TOKEN}/${method}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      }
-    );
-
-    return await response.json();
-  } catch (err) {
-    return {
-      ok: false,
-      description: String(err?.message || err),
-    };
-  }
-}
-
-async function handleJobsGroupDebug(request, env, headers, params, url) {
-  const telegramIdRaw = url.searchParams.get("telegram_id");
-  const telegramId = telegramIdRaw ? Number(telegramIdRaw) : null;
-
-  const result = {
-    ok: true,
-    jobs_chat_id: env.JOBS_CHAT_ID || null,
-    telegram_id: telegramId || null,
-    checks: {},
-  };
-
-  if (!env.JOBS_CHAT_ID) {
-    result.ok = false;
-    result.error = "JOBS_CHAT_ID не встановлено";
-    return json(result, headers, 500);
-  }
-
-  if (!env.JOBS_BOT_TOKEN) {
-    result.ok = false;
-    result.error = "JOBS_BOT_TOKEN не встановлено";
-    return json(result, headers, 500);
-  }
-
-  if (!telegramId) {
-    result.ok = false;
-    result.error = "Не передано telegram_id";
-    return json(result, headers, 400);
-  }
-
-  /* 1. Перевіряємо групу */
-  result.checks.get_chat = await jobsApi(
-    env,
-    "getChat",
-    {
-      chat_id: env.JOBS_CHAT_ID,
-    }
-  );
-
-  /* 2. Статус користувача ДО розблокування */
-  const memberBefore = await jobsApi(
-    env,
-    "getChatMember",
-    {
-      chat_id: env.JOBS_CHAT_ID,
-      user_id: telegramId,
-    }
-  );
-
-  result.checks.member_before = memberBefore;
-
-  /* 3. Якщо kicked — розблоковуємо */
-  if (
-    memberBefore?.ok &&
-    memberBefore.result?.status === "kicked"
-  ) {
-    const unban = await jobsApi(
-      env,
-      "unbanChatMember",
-      {
-        chat_id: env.JOBS_CHAT_ID,
-        user_id: telegramId,
-        only_if_banned: true,
-      }
-    );
-
-    result.checks.unban = unban;
-  } else {
-    result.checks.unban = {
-      skipped: true,
-      description: "Користувач не має статусу kicked",
-    };
-  }
-
-  /* 4. Перевіряємо статус ПІСЛЯ розблокування */
-  const memberAfter = await jobsApi(
-    env,
-    "getChatMember",
-    {
-      chat_id: env.JOBS_CHAT_ID,
-      user_id: telegramId,
-    }
-  );
-
-  result.checks.member_after = memberAfter;
-
-  /*
-   * 5. Створюємо нове запрошення тільки якщо
-   * користувач уже не kicked.
-   */
-  if (
-    memberAfter?.ok &&
-    memberAfter.result?.status !== "kicked"
-  ) {
-    result.checks.create_invite_link =
-      await jobsApi(
-        env,
-        "createChatInviteLink",
-        {
-          chat_id: env.JOBS_CHAT_ID,
-          member_limit: 1,
-          name: `DEBUG ${Date.now()}`.slice(0, 32),
-        }
-      );
-  } else {
-    result.checks.create_invite_link = {
-      ok: false,
-      skipped: true,
-      description:
-        "Запрошення не створено, тому що користувач досі kicked",
-    };
-  }
-
-  return json(result, headers);
-}
-
 const PUBLIC_ROUTES = [
   ["GET",  /^\/$/,                            handleHealth,                { auth: false }],
   ["POST", /^\/$/,                            handleCreateRequest,         { auth: false }],
   ["GET",  /^\/calculator-request\/([^/]+)$/, handleGetCalculatorRequest, { auth: false }],
   ["POST", /^\/request\/([^/]+)\/project$/,   handleUploadRequestProject, { auth: false }],
   ["POST", /^\/telegram-webhook$/,            handleTelegramWebhook,      { auth: false }],
-  ["POST", /^\/jobs-webhook$/,                handleJobsWebhook,          { auth: false }],
-
-  /* ТИМЧАСОВО ПУБЛІЧНИЙ DEBUG */
-  ["GET",  /^\/debug\/jobs-group$/,           handleJobsGroupDebug,       { auth: false }],
+  ["POST", /^\/jobs-webhook$/,                handleJobsWebhook,           { auth: false }],
 ];
 
 const ADMIN_ROUTES = [
-  ["GET",   /^\/requests$/,                     handleListRequests,  { auth: true }],
-  ["GET",   /^\/request\/([^/]+)$/,             handleGetRequest,    { auth: true }],
-  ["POST",  /^\/request\/([^/]+)\/status$/,     handleUpdateStatus,  { auth: true }],
-  ["GET",   /^\/request\/([^/]+)\/events$/,     handleGetEvents,     { auth: true }],
-  ["POST",  /^\/request\/([^/]+)\/client$/,     handleAttachClient,  { auth: true }],
-  ["GET",   /^\/object\/([^/]+)$/,              handleGetObject,     { auth: true }],
-  ["PATCH", /^\/object\/([^/]+)$/,              handleUpdateObject,  { auth: true }],
-  ["POST",  /^\/object\/([^/]+)\/file$/,        handleUploadFile,    { auth: true }],
-  ["GET",   /^\/object\/([^/]+)\/files$/,       handleListFiles,     { auth: true }],
-  ["GET",   /^\/object\/([^/]+)\/file\/(\d+)$/, handleDownloadFile,  { auth: true }],
+  ["GET",   /^\/requests$/,                     handleListRequests,   { auth: true }],
+  ["GET",   /^\/request\/([^/]+)$/,             handleGetRequest,     { auth: true }],
+  ["POST",  /^\/request\/([^/]+)\/status$/,     handleUpdateStatus,   { auth: true }],
+  ["GET",   /^\/request\/([^/]+)\/events$/,     handleGetEvents,      { auth: true }],
+  ["POST",  /^\/request\/([^/]+)\/client$/,     handleAttachClient,   { auth: true }],
+  ["GET",   /^\/object\/([^/]+)$/,              handleGetObject,      { auth: true }],
+  ["PATCH", /^\/object\/([^/]+)$/,              handleUpdateObject,   { auth: true }],
+  ["POST",  /^\/object\/([^/]+)\/file$/,        handleUploadFile,     { auth: true }],
+  ["GET",   /^\/object\/([^/]+)\/files$/,       handleListFiles,      { auth: true }],
+  ["GET",   /^\/object\/([^/]+)\/file\/(\d+)$/, handleDownloadFile,   { auth: true }],
 ];
 
 const routePublic = createRouter(PUBLIC_ROUTES);
