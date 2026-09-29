@@ -5,6 +5,7 @@ import {
   answerJobsCallback,
   sendToMaster,
   createInviteForMaster,
+  banMasterFromJobsGroup,
 } from "../lib/telegram-jobs.js";
 import { sendTelegram } from "../lib/telegram.js";
 import { buildMasterOutcomeButtons } from "../lib/telegram-buttons.js";
@@ -44,15 +45,13 @@ function masterAccessMessage(status) {
     ].join("\n");
   }
 
-  if (status === "archived") {
+  if (status === "inactive") {
     return [
-      "⚫ ПРОФІЛЬ В АРХІВІ",
+      "⚪ ПРОФІЛЬ НЕАКТИВНИЙ",
       "",
-      "Ваш профіль SA-MASTER Jobs зараз неактивний.",
+      "Ви зараз не перебуваєте у групі SA-MASTER Jobs.",
       "",
-      "Доступ до заявок та їх передачі вимкнено.",
-      "",
-      "Для відновлення профілю зверніться до адміністратора.",
+      "Щоб повернутися до роботи із заявками, виконайте /start та отримайте нове запрошення.",
     ].join("\n");
   }
 
@@ -66,6 +65,51 @@ async function ensureActiveMaster(env, telegramId) {
     master,
     active: Boolean(master && master.status === "active"),
   };
+}
+
+async function setMasterMembershipStatus(env, telegramId, nextStatus) {
+  if (!telegramId) return;
+
+  try {
+    await env.DB.prepare(`
+      UPDATE masters
+      SET status = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE telegram_id = ?
+        AND status != 'blocked'
+    `).bind(nextStatus, telegramId).run();
+  } catch (err) {
+    console.error("Master membership status sync failed:", err);
+  }
+}
+
+async function handleJobsGroupServiceMessage(env, msg) {
+  if (String(msg.chat?.id) !== String(env.JOBS_CHAT_ID)) {
+    return false;
+  }
+
+  if (msg.left_chat_member?.id) {
+    await setMasterMembershipStatus(
+      env,
+      msg.left_chat_member.id,
+      "inactive"
+    );
+    return true;
+  }
+
+  if (Array.isArray(msg.new_chat_members) && msg.new_chat_members.length) {
+    for (const member of msg.new_chat_members) {
+      if (member?.id) {
+        await setMasterMembershipStatus(
+          env,
+          member.id,
+          "active"
+        );
+      }
+    }
+    return true;
+  }
+
+  return false;
 }
 
 /* =========================================================
@@ -217,6 +261,13 @@ export async function handleJobsWebhook(
     const text =
       String(msg.text || "").trim();
 
+    if (await handleJobsGroupServiceMessage(env, msg)) {
+      return json(
+        { ok: true },
+        headers
+      );
+    }
+
     /* -----------------------------------------------------
      * /start
      * ----------------------------------------------------- */
@@ -270,6 +321,12 @@ export async function handleJobsWebhook(
               callback_data: "submit_request",
             },
           ],
+          [
+            {
+              text: "🗑 Видалити профіль",
+              callback_data: "delete_profile_ask",
+            },
+          ],
         ];
 
         await sendToMaster(
@@ -286,14 +343,56 @@ export async function handleJobsWebhook(
       }
 
       /* ---------------------------------------------------
-       * ЗАБЛОКОВАНИЙ / АРХІВНИЙ МАЙСТЕР
+       * НЕАКТИВНИЙ МАЙСТЕР — сам вийшов із групи
+       * --------------------------------------------------- */
+
+      if (
+        master &&
+        master.status === "inactive"
+      ) {
+        const inactiveText = [
+          "🔧 SA-MASTER Jobs",
+          "",
+          "⚪ Ваш профіль зараз неактивний.",
+          "",
+          "Ви не перебуваєте у групі заявок.",
+          "Щоб знову працювати із заявками — отримайте нове персональне запрошення.",
+        ].join("\n");
+
+        await sendToMaster(
+          env,
+          chatId,
+          inactiveText,
+          [
+            [
+              {
+                text: "👥 Увійти в групу заявок",
+                callback_data: "get_group_invite",
+              },
+            ],
+            [
+              {
+                text: "🗑 Видалити профіль",
+                callback_data: "delete_profile_ask",
+              },
+            ],
+          ]
+        );
+
+        return json(
+          { ok: true },
+          headers
+        );
+      }
+
+      /* ---------------------------------------------------
+       * ЗАБЛОКОВАНИЙ МАЙСТЕР
        * --------------------------------------------------- */
 
       if (
         master &&
         (
-          master.status === "blocked" ||
-          master.status === "archived"
+          master.status === "blocked"
         )
       ) {
         await sendToMaster(
@@ -448,7 +547,7 @@ export async function handleJobsWebhook(
             cq.id,
             master.status === "blocked"
               ? "🚫 Ваш профіль заблоковано"
-              : "⚫ Ваш профіль неактивний",
+              : "⚪ Ваш профіль неактивний",
             true
           );
         }
@@ -483,6 +582,223 @@ export async function handleJobsWebhook(
      *   нове персональне посилання.
      * ----------------------------------------------------- */
 
+    /* -----------------------------------------------------
+     * Самостійне видалення профілю майстром
+     * ----------------------------------------------------- */
+
+    if (data === "delete_profile_ask") {
+      const master = await getMasterByTelegramId(
+        env,
+        cq.from.id
+      );
+
+      if (!master) {
+        await answerJobsCallback(
+          env,
+          cq.id,
+          "❌ Профіль не знайдено",
+          true
+        );
+
+        return json({ ok: true }, headers);
+      }
+
+      if (master.status === "blocked") {
+        await answerJobsCallback(
+          env,
+          cq.id,
+          "🚫 Ваш профіль заблоковано",
+          true
+        );
+
+        return json({ ok: true }, headers);
+      }
+
+      await answerJobsCallback(env, cq.id, "");
+
+      await sendToMaster(
+        env,
+        cq.message.chat.id,
+        [
+          "⚠️ ВИДАЛЕННЯ ПРОФІЛЮ",
+          "",
+          "Видалити ваш профіль SA-MASTER Jobs назавжди?",
+          "",
+          "Буде видалено вашу анкету, профіль, статистику та персональні дані в системі.",
+          "",
+          "Відновити ці дані буде неможливо.",
+        ].join("\n"),
+        [
+          [
+            {
+              text: "🗑 Видалити",
+              callback_data: "delete_profile_confirm",
+            },
+            {
+              text: "Скасувати",
+              callback_data: "delete_profile_cancel",
+            },
+          ],
+        ]
+      );
+
+      return json({ ok: true }, headers);
+    }
+
+    if (data === "delete_profile_cancel") {
+      await answerJobsCallback(
+        env,
+        cq.id,
+        "Скасовано"
+      );
+
+      await sendToMaster(
+        env,
+        cq.message.chat.id,
+        "✅ Профіль не видалено."
+      );
+
+      return json({ ok: true }, headers);
+    }
+
+    if (data === "delete_profile_confirm") {
+      const master = await getMasterByTelegramId(
+        env,
+        cq.from.id
+      );
+
+      if (!master) {
+        await answerJobsCallback(
+          env,
+          cq.id,
+          "❌ Профіль уже видалено",
+          true
+        );
+
+        return json({ ok: true }, headers);
+      }
+
+      if (master.status === "blocked") {
+        await answerJobsCallback(
+          env,
+          cq.id,
+          "🚫 Ваш профіль заблоковано",
+          true
+        );
+
+        return json({ ok: true }, headers);
+      }
+
+      /*
+       * Спочатку закриваємо доступ до групи.
+       * При повторній реєстрації стандартна логіка запрошення
+       * зможе зняти Telegram-бан і створити нове запрошення.
+       */
+      const ban = await banMasterFromJobsGroup(
+        env,
+        master.telegram_id
+      );
+
+      if (!ban?.ok) {
+        await answerJobsCallback(
+          env,
+          cq.id,
+          `❌ Не вдалося закрити доступ до групи: ${ban?.description || "помилка Telegram"}`,
+          true
+        );
+
+        return json({ ok: true }, headers);
+      }
+
+      try {
+        /*
+         * Клієнтські заявки не видаляємо.
+         * Прибираємо лише всі зв'язки та дані самого майстра.
+         */
+        await env.DB.batch([
+          env.DB.prepare(`
+            DELETE FROM request_outcomes
+            WHERE master_id = ?
+          `).bind(master.telegram_id),
+
+          env.DB.prepare(`
+            DELETE FROM events
+            WHERE author_type = 'master'
+              AND author_id = ?
+          `).bind(String(master.id)),
+
+          env.DB.prepare(`
+            UPDATE requests
+            SET
+              source_master_id = NULL,
+              source_type = 'client',
+              updated_at = CURRENT_TIMESTAMP
+            WHERE source_master_id = ?
+          `).bind(master.id),
+
+          env.DB.prepare(`
+            UPDATE requests
+            SET
+              assigned_master_id = NULL,
+              assigned_master_name = NULL,
+              assigned_at = NULL,
+              updated_at = CURRENT_TIMESTAMP
+            WHERE assigned_master_id = ?
+          `).bind(master.telegram_id),
+
+          env.DB.prepare(`
+            DELETE FROM master_request_drafts
+            WHERE telegram_id = ?
+          `).bind(master.telegram_id),
+
+          env.DB.prepare(`
+            DELETE FROM masters
+            WHERE id = ?
+          `).bind(master.id),
+
+          env.DB.prepare(`
+            DELETE FROM master_applications
+            WHERE telegram_id = ?
+          `).bind(master.telegram_id),
+        ]);
+      } catch (err) {
+        console.error(
+          "Self delete master profile failed:",
+          err
+        );
+
+        await answerJobsCallback(
+          env,
+          cq.id,
+          "❌ Не вдалося видалити профіль",
+          true
+        );
+
+        return json({ ok: true }, headers);
+      }
+
+      await answerJobsCallback(
+        env,
+        cq.id,
+        "🗑 Профіль видалено",
+        true
+      );
+
+      await sendToMaster(
+        env,
+        cq.message.chat.id,
+        [
+          "🗑 ПРОФІЛЬ ВИДАЛЕНО",
+          "",
+          "Ваш профіль SA-MASTER Jobs та персональні дані видалено.",
+          "",
+          "Якщо захочете повернутися — зможете пройти реєстрацію заново.",
+        ].join("\n")
+      );
+
+      return json({ ok: true }, headers);
+    }
+
     if (data === "get_group_invite") {
       const access =
         await ensureActiveMaster(
@@ -490,12 +806,17 @@ export async function handleJobsWebhook(
           cq.from.id
         );
 
-      if (!access.active) {
+      const canJoin =
+        access.master &&
+        (
+          access.master.status === "active" ||
+          access.master.status === "inactive"
+        );
+
+      if (!canJoin) {
         const message =
           access.master?.status === "blocked"
             ? "🚫 Ваш профіль заблоковано"
-            : access.master?.status === "archived"
-            ? "⚫ Ваш профіль в архіві"
             : "❌ Ви не зареєстровані";
 
         await answerJobsCallback(
@@ -621,8 +942,8 @@ export async function handleJobsWebhook(
         const message =
           access.master?.status === "blocked"
             ? "🚫 Ваш профіль заблоковано"
-            : access.master?.status === "archived"
-            ? "⚫ Ваш профіль в архіві"
+            : access.master?.status === "inactive"
+            ? "⚪ Спочатку поверніться до групи заявок"
             : "❌ Ви не зареєстровані";
 
         await answerJobsCallback(
@@ -838,23 +1159,6 @@ async function handleTakeJob(
       env,
       cq.id,
       "🚫 Ваш профіль заблоковано",
-      true
-    );
-
-    return json(
-      { ok: true },
-      headers
-    );
-  }
-
-  if (
-    registeredMaster.status ===
-    "archived"
-  ) {
-    await answerJobsCallback(
-      env,
-      cq.id,
-      "⚫ Ваш профіль в архіві",
       true
     );
 
@@ -1100,23 +1404,6 @@ async function handleMasterOutcome(
       env,
       cq.id,
       "🚫 Ваш профіль заблоковано",
-      true
-    );
-
-    return json(
-      { ok: true },
-      headers
-    );
-  }
-
-  if (
-    registeredMaster.status ===
-    "archived"
-  ) {
-    await answerJobsCallback(
-      env,
-      cq.id,
-      "⚫ Ваш профіль в архіві",
       true
     );
 
