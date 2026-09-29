@@ -4,7 +4,7 @@ import {
   editJobsMessage,
   answerJobsCallback,
   sendToMaster,
-  createInviteLink,
+  createInviteForMaster,
 } from "../lib/telegram-jobs.js";
 import { sendTelegram } from "../lib/telegram.js";
 import { buildMasterOutcomeButtons } from "../lib/telegram-buttons.js";
@@ -474,7 +474,13 @@ export async function handleJobsWebhook(
     }
 
     /* -----------------------------------------------------
-     * Отримати нове посилання на групу
+     * Отримати доступ до групи
+     *
+     * createInviteForMaster:
+     * - якщо майстер уже в групі — нове посилання не створює;
+     * - якщо left — створює нове персональне посилання;
+     * - якщо kicked — спочатку розблоковує, потім створює
+     *   нове персональне посилання.
      * ----------------------------------------------------- */
 
     if (data === "get_group_invite") {
@@ -506,17 +512,45 @@ export async function handleJobsWebhook(
       }
 
       const invite =
-        await createInviteLink(env);
+        await createInviteForMaster(
+          env,
+          cq.from.id
+        );
 
-      if (
-        !invite.ok ||
-        !invite.result?.invite_link
-      ) {
+      if (!invite?.ok) {
         console.error(
-          "Create invite link failed:",
+          "Create invite for master failed:",
           invite
         );
 
+        await answerJobsCallback(
+          env,
+          cq.id,
+          "❌ Не вдалося перевірити доступ до групи",
+          true
+        );
+
+        return json(
+          { ok: true },
+          headers
+        );
+      }
+
+      if (invite.already_member) {
+        await answerJobsCallback(
+          env,
+          cq.id,
+          "✅ Ви вже перебуваєте у групі SA-MASTER Jobs",
+          true
+        );
+
+        return json(
+          { ok: true },
+          headers
+        );
+      }
+
+      if (!invite.invite_link) {
         await answerJobsCallback(
           env,
           cq.id,
@@ -533,28 +567,28 @@ export async function handleJobsWebhook(
       await answerJobsCallback(
         env,
         cq.id,
-        "✅ Посилання створено"
+        invite.was_unbanned
+          ? "✅ Доступ відновлено"
+          : "✅ Посилання створено"
       );
-
-      const inviteLink =
-        invite.result.invite_link;
 
       const inviteText = [
         "👥 ГРУПА SA-MASTER Jobs",
         "",
-        "Натисніть кнопку нижче, щоб приєднатися до групи заявок.",
+        invite.was_unbanned
+          ? "Ваш доступ до групи відновлено."
+          : "Натисніть кнопку нижче, щоб приєднатися до групи заявок.",
         "",
         "🔐 Посилання персональне та одноразове.",
-        "⏱ Діє 24 години.",
         "",
-        "Якщо ви вийдете з групи або посилання втратить чинність — відкрийте бота та отримайте нове.",
+        "Якщо ви вийдете з групи — відкрийте бота та отримайте нове.",
       ].join("\n");
 
       const inviteButtons = [
         [
           {
             text: "👥 Приєднатися до групи",
-            url: inviteLink,
+            url: invite.invite_link,
           },
         ],
       ];
