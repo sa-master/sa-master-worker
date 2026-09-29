@@ -13,6 +13,68 @@ import {
   handleApplicationReview,
 } from "./join.js";
 
+const SITE_URL = "https://sa-master.pro/";
+
+/* =========================================================
+ * Персональне посилання для передачі заявки
+ * ========================================================= */
+async function getMasterReferralLink(env, telegramId) {
+  const master = await env.DB.prepare(`
+    SELECT id, status, referral_token
+    FROM masters
+    WHERE telegram_id = ?
+    LIMIT 1
+  `)
+    .bind(telegramId)
+    .first();
+
+  if (!master || master.status !== "active") {
+    return null;
+  }
+
+  let token = master.referral_token;
+
+  /* Якщо токена ще немає — створюємо */
+  if (!token) {
+    token = crypto.randomUUID().replaceAll("-", "");
+
+    try {
+      await env.DB.prepare(`
+        UPDATE masters
+        SET
+          referral_token = ?,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND referral_token IS NULL
+      `)
+        .bind(token, master.id)
+        .run();
+
+      /*
+       * На випадок одночасних запитів перечитуємо значення з БД.
+       */
+      const updatedMaster = await env.DB.prepare(`
+        SELECT referral_token
+        FROM masters
+        WHERE id = ?
+        LIMIT 1
+      `)
+        .bind(master.id)
+        .first();
+
+      token = updatedMaster?.referral_token || token;
+    } catch (err) {
+      console.error("Referral token generation failed:", err);
+      return null;
+    }
+  }
+
+  const url = new URL(SITE_URL);
+  url.searchParams.set("ref", token);
+
+  return url.toString();
+}
+
 /* =========================================================
  * Публікація заявки в групу майстрів
  * ========================================================= */
@@ -56,7 +118,6 @@ export async function publishRequestToJobsGroup(env, request) {
 
 /* =========================================================
  * POST /jobs-webhook
- * Повідомлення та кнопки SA-MASTER Jobs
  * ========================================================= */
 export async function handleJobsWebhook(request, env, headers) {
   let update;
@@ -78,9 +139,62 @@ export async function handleJobsWebhook(request, env, headers) {
 
     /* -----------------------------------------------------
      * /start
-     * Стартова сторінка SA-MASTER Jobs
      * ----------------------------------------------------- */
     if (text === "/start" || text.startsWith("/start ")) {
+      /*
+       * Спочатку перевіряємо, чи це вже зареєстрований майстер.
+       */
+      const master = await env.DB.prepare(`
+        SELECT id, status
+        FROM masters
+        WHERE telegram_id = ?
+        LIMIT 1
+      `)
+        .bind(fromUser.id)
+        .first();
+
+      /* ---------------------------------------------------
+       * ВЖЕ ЗАРЕЄСТРОВАНИЙ МАЙСТЕР
+       * --------------------------------------------------- */
+      if (master && master.status === "active") {
+        const masterText = [
+          "🔧 SA-MASTER Jobs",
+          "",
+          "Ви зареєстровані в системі як майстер.",
+          "",
+          "🔔 Отримуйте заявки від інших майстрів",
+          "🤝 Беріть у роботу ті, які вам підходять",
+          "🔄 Передавайте заявки, які не можете виконати самі",
+          "",
+          "➕ Якщо маєте заявку, яку не можете взяти в роботу — передайте її через SA-MASTER Jobs.",
+          "",
+          "Заявку потрібно заповнити від імені замовника, вказавши його контактні дані та інформацію про роботи.",
+          "",
+          "⭐ Передані заявки фіксуються за вашим профілем. Ми розвиваємо систему винагород для майстрів, які передають якісні заявки.",
+        ].join("\n");
+
+        const masterButtons = [
+          [
+            {
+              text: "➕ Передати заявку",
+              callback_data: "submit_request",
+            },
+          ],
+        ];
+
+        await sendToMaster(
+          env,
+          chatId,
+          masterText,
+          masterButtons
+        );
+
+        return json({ ok: true }, headers);
+      }
+
+      /* ---------------------------------------------------
+       * НОВИЙ / НЕЗАРЕЄСТРОВАНИЙ КОРИСТУВАЧ
+       * --------------------------------------------------- */
       const welcomeText = [
         "🔧 SA-MASTER Jobs",
         "",
@@ -95,13 +209,11 @@ export async function handleJobsWebhook(request, env, headers) {
         "",
         "➕ Є заявка, яку не можете взяти?",
         "",
-        "Перейдіть на sa-master.pro та заповніть заявку від імені замовника, вказавши його контактні дані та інформацію про роботи.",
-        "",
-        "Після цього заявка потрапить у систему SA-MASTER Jobs і стане доступною іншим майстрам.",
+        "Після реєстрації ви зможете передавати такі заявки через SA-MASTER Jobs.",
         "",
         "⭐ Ми розвиваємо систему винагород для майстрів, які передають якісні заявки.",
         "",
-        "Щоб отримати доступ до заявок, пройдіть коротку реєстрацію майстра.",
+        "Щоб отримати доступ до заявок та можливість передавати власні заявки, пройдіть коротку реєстрацію майстра.",
       ].join("\n");
 
       const welcomeButtons = [
@@ -124,8 +236,7 @@ export async function handleJobsWebhook(request, env, headers) {
     }
 
     /* -----------------------------------------------------
-     * /join
-     * Резервний спосіб запуску анкети
+     * /join — резервний спосіб запуску анкети
      * ----------------------------------------------------- */
     if (text === "/join" || text.startsWith("/join ")) {
       return handleJoinStart(
@@ -137,7 +248,7 @@ export async function handleJobsWebhook(request, env, headers) {
     }
 
     /* -----------------------------------------------------
-     * Відповіді користувача під час анкети
+     * Відповіді під час анкети
      * ----------------------------------------------------- */
     return handleJoinMessage(
       env,
@@ -156,7 +267,7 @@ export async function handleJobsWebhook(request, env, headers) {
     const data = String(cq.data || "");
 
     /* -----------------------------------------------------
-     * Долучитися до SA-MASTER Jobs
+     * Почати реєстрацію
      * ----------------------------------------------------- */
     if (data === "join_start") {
       await answerJobsCallback(
@@ -174,6 +285,65 @@ export async function handleJobsWebhook(request, env, headers) {
     }
 
     /* -----------------------------------------------------
+     * Передати заявку
+     * ----------------------------------------------------- */
+    if (data === "submit_request") {
+      const referralLink = await getMasterReferralLink(
+        env,
+        cq.from.id
+      );
+
+      if (!referralLink) {
+        await answerJobsCallback(
+          env,
+          cq.id,
+          "❌ Не вдалося створити посилання",
+          true
+        );
+
+        return json({ ok: true }, headers);
+      }
+
+      await answerJobsCallback(
+        env,
+        cq.id,
+        ""
+      );
+
+      const text = [
+        "➕ ПЕРЕДАТИ ЗАЯВКУ",
+        "",
+        "Натисніть кнопку нижче та заповніть заявку від імені замовника.",
+        "",
+        "Вкажіть:",
+        "👤 ім'я замовника",
+        "📞 його телефон",
+        "🔧 потрібні роботи",
+        "📍 інформацію про об'єкт",
+        "",
+        "Заявка буде автоматично прив'язана до вашого профілю SA-MASTER Jobs.",
+      ].join("\n");
+
+      const buttons = [
+        [
+          {
+            text: "➕ Заповнити заявку",
+            url: referralLink,
+          },
+        ],
+      ];
+
+      await sendToMaster(
+        env,
+        cq.message.chat.id,
+        text,
+        buttons
+      );
+
+      return json({ ok: true }, headers);
+    }
+
+    /* -----------------------------------------------------
      * Взяти заявку
      * ----------------------------------------------------- */
     if (data.startsWith("take:")) {
@@ -186,7 +356,7 @@ export async function handleJobsWebhook(request, env, headers) {
     }
 
     /* -----------------------------------------------------
-     * Результат контакту із замовником
+     * Результат контакту
      * ----------------------------------------------------- */
     if (data.startsWith("outcome:")) {
       const [, requestCode, outcome] = data.split(":");
@@ -239,11 +409,7 @@ export async function handleJobsWebhook(request, env, headers) {
 
 /* =========================================================
  * Перший майстер, який натиснув кнопку,
- * отримує заявку.
- *
- * Дані майстра зберігаються в базі
- * та надсилаються адміністратору,
- * але не показуються в групі.
+ * отримує заявку
  * ========================================================= */
 async function handleTakeJob(
   env,
@@ -278,9 +444,6 @@ async function handleTakeJob(
     return json({ ok: true }, headers);
   }
 
-  /* -----------------------------------------------------
-   * Перевірка реєстрації майстра
-   * ----------------------------------------------------- */
   const registeredMaster = await env.DB.prepare(`
     SELECT id, status
     FROM masters
@@ -304,11 +467,6 @@ async function handleTakeJob(
     return json({ ok: true }, headers);
   }
 
-  /* -----------------------------------------------------
-   * WHERE assigned_master_id IS NULL
-   * захищає від одночасного взяття заявки
-   * двома майстрами.
-   * ----------------------------------------------------- */
   let assigned;
 
   try {
@@ -352,9 +510,6 @@ async function handleTakeJob(
     return json({ ok: true }, headers);
   }
 
-  /* -----------------------------------------------------
-   * Запис події
-   * ----------------------------------------------------- */
   await env.DB.prepare(`
     INSERT INTO events (
       object_id,
@@ -378,9 +533,6 @@ async function handleTakeJob(
     )
     .run();
 
-  /* -----------------------------------------------------
-   * Оновлення повідомлення в групі
-   * ----------------------------------------------------- */
   const groupText = [
     "🔒 ЗАЯВКУ ВЖЕ ВЗЯТО В РОБОТУ",
     `🆔 ${req.request_code}`,
@@ -394,9 +546,6 @@ async function handleTakeJob(
     []
   );
 
-  /* -----------------------------------------------------
-   * Контакти замовника отримує майстер
-   * ----------------------------------------------------- */
   const contactsText = [
     `✅ Ви взяли заявку ${req.request_code}`,
     "",
@@ -422,9 +571,6 @@ async function handleTakeJob(
     buildMasterOutcomeButtons(req.request_code)
   );
 
-  /* -----------------------------------------------------
-   * Адміністратор отримує інформацію про виконавця
-   * ----------------------------------------------------- */
   await sendTelegram(
     env,
     [
@@ -500,9 +646,6 @@ async function handleMasterOutcome(
     return json({ ok: true }, headers);
   }
 
-  /* -----------------------------------------------------
-   * Зберігаємо результат
-   * ----------------------------------------------------- */
   try {
     await env.DB.prepare(`
       INSERT INTO request_outcomes (
@@ -744,7 +887,7 @@ async function handleMasterOutcome(
   }
 
   /* =======================================================
-   * ЗАЯВКА НЕ ПІДХОДИТЬ
+   * НЕ ПІДХОДИТЬ
    * ======================================================= */
   if (outcome === "too_expensive") {
     await env.DB.batch([
