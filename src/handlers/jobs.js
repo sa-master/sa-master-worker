@@ -4,6 +4,7 @@ import {
   editJobsMessage,
   answerJobsCallback,
   sendToMaster,
+  createInviteLink,
 } from "../lib/telegram-jobs.js";
 import { sendTelegram } from "../lib/telegram.js";
 import { buildMasterOutcomeButtons } from "../lib/telegram-buttons.js";
@@ -33,7 +34,7 @@ async function getMasterByTelegramId(env, telegramId) {
 function masterAccessMessage(status) {
   if (status === "blocked") {
     return [
-      "🚫 ДОСТУП ЗАБЛОКОВАНО",
+      "🚫 ДОСТУП ЗАБОРОНЕНО",
       "",
       "Ваш профіль SA-MASTER Jobs заблоковано адміністратором.",
       "",
@@ -247,6 +248,8 @@ export async function handleJobsWebhook(
           "🤝 Беріть у роботу ті, які вам підходять",
           "🔄 Передавайте заявки, які не можете виконати самі",
           "",
+          "👥 Якщо ви ще не в групі заявок або раніше вийшли з неї — отримайте нове персональне запрошення.",
+          "",
           "➕ Якщо маєте заявку, яку не можете взяти в роботу — передайте її через SA-MASTER Jobs.",
           "",
           "Заявку потрібно заповнити від імені замовника, вказавши його контактні дані та інформацію про роботи.",
@@ -257,9 +260,14 @@ export async function handleJobsWebhook(
         const masterButtons = [
           [
             {
+              text: "👥 Увійти в групу заявок",
+              callback_data: "get_group_invite",
+            },
+          ],
+          [
+            {
               text: "➕ Передати заявку",
-              callback_data:
-                "submit_request",
+              callback_data: "submit_request",
             },
           ],
         ];
@@ -462,6 +470,105 @@ export async function handleJobsWebhook(
         headers,
         cq.message.chat.id,
         cq.from
+      );
+    }
+
+    /* -----------------------------------------------------
+     * Отримати нове посилання на групу
+     * ----------------------------------------------------- */
+
+    if (data === "get_group_invite") {
+      const access =
+        await ensureActiveMaster(
+          env,
+          cq.from.id
+        );
+
+      if (!access.active) {
+        const message =
+          access.master?.status === "blocked"
+            ? "🚫 Ваш профіль заблоковано"
+            : access.master?.status === "archived"
+            ? "⚫ Ваш профіль в архіві"
+            : "❌ Ви не зареєстровані";
+
+        await answerJobsCallback(
+          env,
+          cq.id,
+          message,
+          true
+        );
+
+        return json(
+          { ok: true },
+          headers
+        );
+      }
+
+      const invite =
+        await createInviteLink(env);
+
+      if (
+        !invite.ok ||
+        !invite.result?.invite_link
+      ) {
+        console.error(
+          "Create invite link failed:",
+          invite
+        );
+
+        await answerJobsCallback(
+          env,
+          cq.id,
+          "❌ Не вдалося створити посилання",
+          true
+        );
+
+        return json(
+          { ok: true },
+          headers
+        );
+      }
+
+      await answerJobsCallback(
+        env,
+        cq.id,
+        "✅ Посилання створено"
+      );
+
+      const inviteLink =
+        invite.result.invite_link;
+
+      const inviteText = [
+        "👥 ГРУПА SA-MASTER Jobs",
+        "",
+        "Натисніть кнопку нижче, щоб приєднатися до групи заявок.",
+        "",
+        "🔐 Посилання персональне та одноразове.",
+        "⏱ Діє 24 години.",
+        "",
+        "Якщо ви вийдете з групи або посилання втратить чинність — відкрийте бота та отримайте нове.",
+      ].join("\n");
+
+      const inviteButtons = [
+        [
+          {
+            text: "👥 Приєднатися до групи",
+            url: inviteLink,
+          },
+        ],
+      ];
+
+      await sendToMaster(
+        env,
+        cq.message.chat.id,
+        inviteText,
+        inviteButtons
+      );
+
+      return json(
+        { ok: true },
+        headers
       );
     }
 
@@ -931,12 +1038,6 @@ async function handleMasterOutcome(
       ? `@${telegramMaster.username}`
       : telegramMaster.first_name;
 
-  /* -------------------------------------------------------
-   * НОВЕ:
-   * навіть стара Telegram-кнопка не працюватиме,
-   * якщо майстра заблоковано або архівовано.
-   * ------------------------------------------------------- */
-
   const registeredMaster =
     await getMasterByTelegramId(
       env,
@@ -1054,12 +1155,6 @@ async function handleMasterOutcome(
       headers
     );
   }
-
-  /* -------------------------------------------------------
-   * Додатковий захист:
-   * результат може вказати тільки майстер,
-   * якому зараз призначена ця заявка.
-   * ------------------------------------------------------- */
 
   if (
     String(req.assigned_master_id || "") !==
