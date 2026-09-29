@@ -4,6 +4,7 @@ import { requireAuth } from "./lib/auth.js";
 import { createRouter } from "./lib/router.js";
 
 import { handleHealth } from "./handlers/health.js";
+
 import {
   handleCreateRequest,
   handleGetCalculatorRequest,
@@ -14,8 +15,14 @@ import {
   handleAttachClient,
   handleTelegramWebhook,
 } from "./handlers/requests.js";
+
 import { handleJobsWebhook } from "./handlers/jobs.js";
-import { handleGetObject, handleUpdateObject } from "./handlers/objects.js";
+
+import {
+  handleGetObject,
+  handleUpdateObject,
+} from "./handlers/objects.js";
+
 import {
   handleUploadRequestProject,
   handleUploadFile,
@@ -23,39 +30,163 @@ import {
   handleDownloadFile,
 } from "./handlers/files.js";
 
+
+/* =========================================================
+ * PUBLIC ROUTES
+ * ========================================================= */
+
 const PUBLIC_ROUTES = [
-  ["GET",  /^\/$/,                            handleHealth,                { auth: false }],
-  ["POST", /^\/$/,                            handleCreateRequest,         { auth: false }],
-  ["GET",  /^\/calculator-request\/([^/]+)$/, handleGetCalculatorRequest, { auth: false }],
-  ["POST", /^\/request\/([^/]+)\/project$/,   handleUploadRequestProject, { auth: false }],
-  ["POST", /^\/telegram-webhook$/,            handleTelegramWebhook,      { auth: false }],
-  ["POST", /^\/jobs-webhook$/,                handleJobsWebhook,           { auth: false }],
+  [
+    "GET",
+    /^\/$/,
+    handleHealth,
+    { auth: false },
+  ],
+
+  [
+    "POST",
+    /^\/$/,
+    handleCreateRequest,
+    { auth: false },
+  ],
+
+  [
+    "GET",
+    /^\/calculator-request\/([^/]+)$/,
+    handleGetCalculatorRequest,
+    { auth: false },
+  ],
+
+  [
+    "POST",
+    /^\/request\/([^/]+)\/project$/,
+    handleUploadRequestProject,
+    { auth: false },
+  ],
+
+  [
+    "POST",
+    /^\/telegram-webhook$/,
+    handleTelegramWebhook,
+    { auth: false },
+  ],
+
+  [
+    "POST",
+    /^\/jobs-webhook$/,
+    handleJobsWebhook,
+    { auth: false },
+  ],
 ];
 
+
+/* =========================================================
+ * ADMIN ROUTES
+ * ========================================================= */
+
 const ADMIN_ROUTES = [
-  ["GET",   /^\/requests$/,                     handleListRequests,   { auth: true }],
-  ["GET",   /^\/request\/([^/]+)$/,             handleGetRequest,     { auth: true }],
-  ["POST",  /^\/request\/([^/]+)\/status$/,     handleUpdateStatus,   { auth: true }],
-  ["GET",   /^\/request\/([^/]+)\/events$/,     handleGetEvents,      { auth: true }],
-  ["POST",  /^\/request\/([^/]+)\/client$/,     handleAttachClient,   { auth: true }],
-  ["GET",   /^\/object\/([^/]+)$/,              handleGetObject,      { auth: true }],
-  ["PATCH", /^\/object\/([^/]+)$/,              handleUpdateObject,   { auth: true }],
-  ["POST",  /^\/object\/([^/]+)\/file$/,        handleUploadFile,     { auth: true }],
-  ["GET",   /^\/object\/([^/]+)\/files$/,       handleListFiles,      { auth: true }],
-  ["GET",   /^\/object\/([^/]+)\/file\/(\d+)$/, handleDownloadFile,   { auth: true }],
+  [
+    "GET",
+    /^\/requests$/,
+    handleListRequests,
+    { auth: true },
+  ],
+
+  [
+    "GET",
+    /^\/request\/([^/]+)$/,
+    handleGetRequest,
+    { auth: true },
+  ],
+
+  [
+    "POST",
+    /^\/request\/([^/]+)\/status$/,
+    handleUpdateStatus,
+    { auth: true },
+  ],
+
+  [
+    "GET",
+    /^\/request\/([^/]+)\/events$/,
+    handleGetEvents,
+    { auth: true },
+  ],
+
+  [
+    "POST",
+    /^\/request\/([^/]+)\/client$/,
+    handleAttachClient,
+    { auth: true },
+  ],
+
+  [
+    "GET",
+    /^\/object\/([^/]+)$/,
+    handleGetObject,
+    { auth: true },
+  ],
+
+  [
+    "PATCH",
+    /^\/object\/([^/]+)$/,
+    handleUpdateObject,
+    { auth: true },
+  ],
+
+  [
+    "POST",
+    /^\/object\/([^/]+)\/file$/,
+    handleUploadFile,
+    { auth: true },
+  ],
+
+  [
+    "GET",
+    /^\/object\/([^/]+)\/files$/,
+    handleListFiles,
+    { auth: true },
+  ],
+
+  [
+    "GET",
+    /^\/object\/([^/]+)\/file\/(\d+)$/,
+    handleDownloadFile,
+    { auth: true },
+  ],
 ];
+
+
+/* =========================================================
+ * ROUTERS
+ * ========================================================= */
 
 const routePublic = createRouter(PUBLIC_ROUTES);
 const routeAdmin = createRouter(ADMIN_ROUTES);
 
+
+/* =========================================================
+ * WORKER
+ * ========================================================= */
+
 export default {
   async fetch(request, env, ctx) {
-    if (request.method === "OPTIONS") return preflight();
+    /* -----------------------------------------------------
+     * CORS PREFLIGHT
+     * ----------------------------------------------------- */
+
+    if (request.method === "OPTIONS") {
+      return preflight();
+    }
 
     const headers = corsHeaders();
     const url = new URL(request.url);
 
     try {
+      /* ---------------------------------------------------
+       * PUBLIC ROUTES
+       * --------------------------------------------------- */
+
       const pub = await routePublic(request, url);
 
       if (pub) {
@@ -69,12 +200,23 @@ export default {
         );
       }
 
+
+      /* ---------------------------------------------------
+       * ADMIN ROUTES
+       * --------------------------------------------------- */
+
       const admin = await routeAdmin(request, url);
 
       if (admin) {
-        const authError = requireAuth(request, env, headers);
+        const authError = requireAuth(
+          request,
+          env,
+          headers
+        );
 
-        if (authError) return authError;
+        if (authError) {
+          return authError;
+        }
 
         return await admin.handler(
           request,
@@ -86,9 +228,26 @@ export default {
         );
       }
 
-      return error("Not found", headers, 404);
+
+      /* ---------------------------------------------------
+       * NOT FOUND
+       * --------------------------------------------------- */
+
+      return error(
+        "Not found",
+        headers,
+        404
+      );
+
     } catch (err) {
-      console.error("Unhandled error:", err);
+      /* ---------------------------------------------------
+       * UNHANDLED ERROR
+       * --------------------------------------------------- */
+
+      console.error(
+        "Unhandled error:",
+        err
+      );
 
       return error(
         err?.message || String(err),
