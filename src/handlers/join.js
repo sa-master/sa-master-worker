@@ -11,8 +11,8 @@ import {
 
 const MASTER_STATUS = {
   ACTIVE: "active",
+  INACTIVE: "inactive",
   BLOCKED: "blocked",
-  ARCHIVED: "archived",
 };
 
 async function getMasterByTelegramId(env, telegramId) {
@@ -49,6 +49,17 @@ async function sendMasterStatusMessage(env, chatId, master) {
     return true;
   }
 
+  if (master.status === MASTER_STATUS.INACTIVE) {
+    await sendToMaster(env, chatId, [
+      "⚪ Ваш профіль SA-MASTER Jobs неактивний.",
+      "",
+      "Ваші дані та історія в системі збережені.",
+      "",
+      "Щоб повернутися до групи заявок, відкрийте @sa_master_jobs_bot і натисніть /start.",
+    ].join("\n"));
+    return true;
+  }
+
   if (master.status === MASTER_STATUS.BLOCKED) {
     await sendToMaster(env, chatId, [
       "🚫 Ваш доступ до SA-MASTER Jobs заблоковано.",
@@ -56,15 +67,6 @@ async function sendMasterStatusMessage(env, chatId, master) {
       "Повторна реєстрація не змінює статус профілю.",
       "",
       "Якщо вважаєте, що це сталося помилково — зверніться до адміністратора.",
-    ].join("\n"));
-    return true;
-  }
-
-  if (master.status === MASTER_STATUS.ARCHIVED) {
-    await sendToMaster(env, chatId, [
-      "⚫ Ваш профіль SA-MASTER Jobs знаходиться в архіві.",
-      "",
-      "Для відновлення доступу зверніться до адміністратора.",
     ].join("\n"));
     return true;
   }
@@ -438,7 +440,10 @@ export async function createNewMasterInvite(env, telegramId) {
     return { ok: false, error: "MASTER_NOT_FOUND" };
   }
 
-  if (master.status !== MASTER_STATUS.ACTIVE) {
+  if (
+    master.status !== MASTER_STATUS.ACTIVE &&
+    master.status !== MASTER_STATUS.INACTIVE
+  ) {
     return {
       ok: false,
       error: "MASTER_NOT_ACTIVE",
