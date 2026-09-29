@@ -25,18 +25,8 @@ import {
 
 /* =========================================================
  * TEMP DEBUG: GET /debug/jobs-group
- *
- * Виклик:
- * /debug/jobs-group?telegram_id=123456789
- *
- * Потрібен заголовок авторизації так само, як для ADMIN_ROUTES.
- * Повертає:
- * - JOBS_CHAT_ID
- * - getChat
- * - getChatMember для вказаного telegram_id
- * - результат створення НОВОГО invite link
- *
- * Після діагностики цей маршрут треба видалити.
+ * Тимчасово публічний маршрут для діагностики.
+ * Після перевірки його треба видалити.
  * ========================================================= */
 
 const TELEGRAM_API = "https://api.telegram.org";
@@ -61,9 +51,7 @@ async function jobsApi(env, method, payload = {}) {
       }
     );
 
-    const data = await response.json();
-
-    return data;
+    return await response.json();
   } catch (err) {
     return {
       ok: false,
@@ -95,29 +83,20 @@ async function handleJobsGroupDebug(request, env, headers, params, url) {
     return json(result, headers, 500);
   }
 
-  result.checks.get_chat = await jobsApi(
-    env,
-    "getChat",
-    {
-      chat_id: env.JOBS_CHAT_ID,
-    }
-  );
+  result.checks.get_chat = await jobsApi(env, "getChat", {
+    chat_id: env.JOBS_CHAT_ID,
+  });
 
   if (telegramId) {
-    result.checks.get_chat_member = await jobsApi(
-      env,
-      "getChatMember",
-      {
-        chat_id: env.JOBS_CHAT_ID,
-        user_id: telegramId,
-      }
-    );
+    result.checks.get_chat_member = await jobsApi(env, "getChatMember", {
+      chat_id: env.JOBS_CHAT_ID,
+      user_id: telegramId,
+    });
   } else {
     result.checks.get_chat_member = {
       ok: false,
       skipped: true,
-      description:
-        "Додайте ?telegram_id=TELEGRAM_ID другого акаунта",
+      description: "Додайте ?telegram_id=TELEGRAM_ID другого акаунта",
     };
   }
 
@@ -140,22 +119,22 @@ const PUBLIC_ROUTES = [
   ["POST", /^\/request\/([^/]+)\/project$/,   handleUploadRequestProject, { auth: false }],
   ["POST", /^\/telegram-webhook$/,            handleTelegramWebhook,      { auth: false }],
   ["POST", /^\/jobs-webhook$/,                handleJobsWebhook,          { auth: false }],
+
+  /* ТИМЧАСОВО ПУБЛІЧНИЙ DEBUG */
+  ["GET",  /^\/debug\/jobs-group$/,           handleJobsGroupDebug,       { auth: false }],
 ];
 
 const ADMIN_ROUTES = [
-  ["GET",   /^\/requests$/,                     handleListRequests,   { auth: true }],
-  ["GET",   /^\/request\/([^/]+)$/,             handleGetRequest,     { auth: true }],
-  ["POST",  /^\/request\/([^/]+)\/status$/,     handleUpdateStatus,   { auth: true }],
-  ["GET",   /^\/request\/([^/]+)\/events$/,     handleGetEvents,      { auth: true }],
-  ["POST",  /^\/request\/([^/]+)\/client$/,     handleAttachClient,   { auth: true }],
-  ["GET",   /^\/object\/([^/]+)$/,              handleGetObject,      { auth: true }],
-  ["PATCH", /^\/object\/([^/]+)$/,              handleUpdateObject,   { auth: true }],
-  ["POST",  /^\/object\/([^/]+)\/file$/,        handleUploadFile,     { auth: true }],
-  ["GET",   /^\/object\/([^/]+)\/files$/,       handleListFiles,      { auth: true }],
-  ["GET",   /^\/object\/([^/]+)\/file\/(\d+)$/, handleDownloadFile,   { auth: true }],
-
-  /* Тимчасова діагностика Telegram-групи */
-  ["GET",   /^\/debug\/jobs-group$/,            handleJobsGroupDebug, { auth: true }],
+  ["GET",   /^\/requests$/,                     handleListRequests,  { auth: true }],
+  ["GET",   /^\/request\/([^/]+)$/,             handleGetRequest,    { auth: true }],
+  ["POST",  /^\/request\/([^/]+)\/status$/,     handleUpdateStatus,  { auth: true }],
+  ["GET",   /^\/request\/([^/]+)\/events$/,     handleGetEvents,     { auth: true }],
+  ["POST",  /^\/request\/([^/]+)\/client$/,     handleAttachClient,  { auth: true }],
+  ["GET",   /^\/object\/([^/]+)$/,              handleGetObject,     { auth: true }],
+  ["PATCH", /^\/object\/([^/]+)$/,              handleUpdateObject,  { auth: true }],
+  ["POST",  /^\/object\/([^/]+)\/file$/,        handleUploadFile,    { auth: true }],
+  ["GET",   /^\/object\/([^/]+)\/files$/,       handleListFiles,     { auth: true }],
+  ["GET",   /^\/object\/([^/]+)\/file\/(\d+)$/, handleDownloadFile,  { auth: true }],
 ];
 
 const routePublic = createRouter(PUBLIC_ROUTES);
