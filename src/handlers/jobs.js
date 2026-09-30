@@ -126,13 +126,34 @@ async function saveOutcome(env, req, masterId, outcome) {
 }
 
 async function notifyAdmin(env, lines, buttons = null) {
+  /*
+   * TEMP DIAGNOSTICS
+   * Remove after the missing admin inline-keyboard issue is resolved.
+   */
+  console.log("ADMIN NOTIFY TEXT:", lines.join("\n"));
+  console.log("ADMIN BUTTONS:", JSON.stringify(buttons));
+
   try {
+    let result;
+
     if (buttons?.length) {
-      return await sendMessageWithButtons(env, lines.join("\n"), buttons);
+      result = await sendMessageWithButtons(env, lines.join("\n"), buttons);
+    } else {
+      result = await sendTelegram(env, lines.join("\n"));
     }
-    return await sendTelegram(env, lines.join("\n"));
+
+    console.log("ADMIN TELEGRAM RESULT:", JSON.stringify({
+      ok: result?.ok,
+      description: result?.description || null,
+      message_id: result?.result?.message_id || null,
+      has_reply_markup: Boolean(result?.result?.reply_markup),
+      reply_markup: result?.result?.reply_markup || null,
+    }));
+
+    return result;
   } catch (err) {
     console.error("Admin notification failed:", err);
+    return { ok: false, description: String(err?.message || err) };
   }
 }
 
