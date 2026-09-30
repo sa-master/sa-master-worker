@@ -82,73 +82,7 @@ async function deleteIncomingCommand(env, msg) {
 }
 
 /* =========================================================
- * ADMIN: тимчасове повідомлення статистики
- * ========================================================= */
-
-async function ensureAdminUiStateTable(env) {
-  await env.DB.prepare(`
-    CREATE TABLE IF NOT EXISTS admin_ui_state (
-      chat_id TEXT PRIMARY KEY,
-      stats_message_id INTEGER,
-      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )
-  `).run();
-}
-
-async function rememberStatsMessage(env, chatId, messageId) {
-  if (chatId == null || messageId == null) return;
-  await ensureAdminUiStateTable(env);
-  await env.DB.prepare(`
-    INSERT INTO admin_ui_state (chat_id, stats_message_id, updated_at)
-    VALUES (?, ?, CURRENT_TIMESTAMP)
-    ON CONFLICT(chat_id) DO UPDATE SET
-      stats_message_id = excluded.stats_message_id,
-      updated_at = CURRENT_TIMESTAMP
-  `).bind(String(chatId), Number(messageId)).run();
-}
-
-async function deleteTelegramMessage(env, chatId, messageId) {
-  if (!env.BOT_TOKEN || chatId == null || messageId == null) return;
-  try {
-    const res = await fetch(
-      `https://api.telegram.org/bot${env.BOT_TOKEN}/deleteMessage`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
-      }
-    );
-    const data = await res.json();
-    if (!data.ok && !String(data.description || "").includes("message to delete not found")) {
-      console.error("Telegram delete stats message failed:", data.description || data);
-    }
-  } catch (err) {
-    console.error("Telegram delete stats message error:", err);
-  }
-}
-
-async function removeStatsMessage(env, chatId) {
-  if (chatId == null) return;
-  await ensureAdminUiStateTable(env);
-  const row = await env.DB.prepare(`
-    SELECT stats_message_id
-    FROM admin_ui_state
-    WHERE chat_id = ?
-    LIMIT 1
-  `).bind(String(chatId)).first();
-
-  if (row?.stats_message_id != null) {
-    await deleteTelegramMessage(env, chatId, row.stats_message_id);
-  }
-
-  await env.DB.prepare(`
-    DELETE FROM admin_ui_state
-    WHERE chat_id = ?
-  `).bind(String(chatId)).run();
-}
-
-/* =========================================================
- * ADMIN: головне меню
+ * ADMIN: головне меню / статистика
  * ========================================================= */
 
 async function sendAdminMenu(env, chatId = null, messageId = null) {
@@ -164,7 +98,7 @@ async function sendAdminMenu(env, chatId = null, messageId = null) {
 
   return render(
     [
-      "🛠 SA-MASTER",
+      "📊 СТАТИСТИКА",
       "",
       `📋 Заявки: ${stats?.requests_total || 0}`,
       `🆕 Нові: ${stats?.requests_new || 0}`,
@@ -200,9 +134,7 @@ async function sendRequestsMenu(env, chatId = null, messageId = null) {
         "",
         "У базі поки немає заявок.",
       ].join("\n"),
-      [[
-        { text: "⬅️ Головне меню", callback_data: "admin_menu" },
-      ]]
+      []
     );
   }
 
@@ -210,10 +142,6 @@ async function sendRequestsMenu(env, chatId = null, messageId = null) {
     text: `${statusLabel(req.status)} · ${req.request_code} · ${req.name || "—"}`,
     callback_data: `request_open:${req.request_code}`,
   }]);
-
-  buttons.push([
-    { text: "⬅️ Головне меню", callback_data: "admin_menu" },
-  ]);
 
   return render(
     [
@@ -293,7 +221,6 @@ async function showRequestCard(
 
   buttons.push([
     { text: "📋 До заявок", callback_data: "requests_list" },
-    { text: "🏠 Меню", callback_data: "admin_menu" },
   ]);
 
   await editMessageText(
@@ -373,9 +300,7 @@ async function sendMastersMenu(env, chatId = null, messageId = null) {
         "",
         "У базі поки немає зареєстрованих майстрів.",
       ].join("\n"),
-      [[
-        { text: "⬅️ Головне меню", callback_data: "admin_menu" },
-      ]]
+      []
     );
   }
 
@@ -391,10 +316,6 @@ async function sendMastersMenu(env, chatId = null, messageId = null) {
         `Майстер #${master.id}`}`,
     callback_data: `master_open:${master.id}`,
   }]);
-
-  buttons.push([
-    { text: "⬅️ Головне меню", callback_data: "admin_menu" },
-  ]);
 
   return render(
     [
@@ -480,7 +401,6 @@ async function showMasterCard(
 
   buttons.push([
     { text: "👥 До списку", callback_data: "masters_list" },
-    { text: "🏠 Меню", callback_data: "admin_menu" },
   ]);
 
   await editMessageText(
@@ -819,10 +739,6 @@ async function deleteMasterPermanently(
       {
         text: "👥 До списку майстрів",
         callback_data: "masters_list",
-      },
-      {
-        text: "🏠 Меню",
-        callback_data: "admin_menu",
       },
     ]]
   );
@@ -1817,9 +1733,13 @@ export async function handleTelegramWebhook(
   /* -------------------------------------------------------
    * Звичайні повідомлення / команди.
    *
-   * /start створює ОДНЕ повідомлення адмінки.
-   * Подальша навігація відбувається редагуванням цього
-   * повідомлення через inline-кнопки.
+   * ВАЖЛИВО:
+   * /start    -> ТІЛЬКИ статистика.
+   * /requests -> ТІЛЬКИ список заявок.
+   * /masters  -> ТІЛЬКИ список майстрів.
+   *
+   * Немає admin_ui_state і немає автоматичного виклику
+   * sendAdminMenu() з /requests або /masters.
    * ----------------------------------------------------- */
 
   if (update.message) {
@@ -1838,23 +1758,12 @@ export async function handleTelegramWebhook(
     const text =
       String(msg.text || "").trim();
 
-    // Адмін-команди навмисно розведені:
-    // /start    -> тільки статистика
-    // /requests -> тільки список заявок
-    // /masters  -> тільки список майстрів
-    const adminCommand = text.split("@")[0].toLowerCase();
+    const adminCommand =
+      text.split(/\s+/)[0].split("@")[0].toLowerCase();
 
     if (adminCommand === "/start") {
       await deleteIncomingCommand(env, msg);
-      await removeStatsMessage(env, msg.chat?.id);
-      const sent = await sendAdminMenu(env);
-      if (sent?.ok && sent?.result?.message_id != null) {
-        await rememberStatsMessage(
-          env,
-          sent.result.chat?.id ?? msg.chat?.id ?? env.CHAT_ID,
-          sent.result.message_id
-        );
-      }
+      await sendAdminMenu(env);
 
       return json(
         { ok: true },
@@ -1864,7 +1773,6 @@ export async function handleTelegramWebhook(
 
     if (adminCommand === "/requests") {
       await deleteIncomingCommand(env, msg);
-      await removeStatsMessage(env, msg.chat?.id);
       await sendRequestsMenu(env);
 
       return json(
@@ -1875,7 +1783,6 @@ export async function handleTelegramWebhook(
 
     if (adminCommand === "/masters") {
       await deleteIncomingCommand(env, msg);
-      await removeStatsMessage(env, msg.chat?.id);
       await sendMastersMenu(env);
 
       return json(
@@ -1946,10 +1853,6 @@ export async function handleTelegramWebhook(
     );
   }
 
-  /* -------------------------------------------------------
-   * Головне меню
-   * ----------------------------------------------------- */
-
   if (data === "admin_menu") {
     await sendAdminMenu(
       env,
@@ -1968,10 +1871,6 @@ export async function handleTelegramWebhook(
       headers
     );
   }
-
-  /* -------------------------------------------------------
-   * Заявки
-   * ----------------------------------------------------- */
 
   if (data === "requests_list") {
     await sendRequestsMenu(
@@ -2009,10 +1908,6 @@ export async function handleTelegramWebhook(
       headers
     );
   }
-
-  /* -------------------------------------------------------
-   * Майстри
-   * ----------------------------------------------------- */
 
   if (data === "masters_list") {
     await sendMastersMenu(
@@ -2199,10 +2094,6 @@ export async function handleTelegramWebhook(
     );
   }
 
-  /* -------------------------------------------------------
-   * Деталі заявки
-   * ----------------------------------------------------- */
-
   if (data.startsWith("details:")) {
     return handleTelegramDetails(
       env,
@@ -2213,10 +2104,6 @@ export async function handleTelegramWebhook(
       messageId
     );
   }
-
-  /* -------------------------------------------------------
-   * Статус заявки
-   * ----------------------------------------------------- */
 
   if (data.startsWith("status:")) {
     const [
@@ -2237,10 +2124,6 @@ export async function handleTelegramWebhook(
     );
   }
 
-  /* -------------------------------------------------------
-   * Передача в Jobs
-   * ----------------------------------------------------- */
-
   if (
     data.startsWith("transfer_to_jobs:")
   ) {
@@ -2254,10 +2137,6 @@ export async function handleTelegramWebhook(
       workerOrigin
     );
   }
-
-  /* -------------------------------------------------------
-   * Анкети майстрів
-   * ----------------------------------------------------- */
 
   if (data.startsWith("app_approve:")) {
     const {
@@ -2375,10 +2254,6 @@ async function handleTelegramDetails(
         text: "⬅️ До заявки",
         callback_data:
           `request_open:${requestCode}`,
-      },
-      {
-        text: "🏠 Меню",
-        callback_data: "admin_menu",
       },
     ]]
   );
@@ -2582,10 +2457,6 @@ async function handleTelegramStatusUpdate(
       text: "📋 До заявок",
       callback_data: "requests_list",
     },
-    {
-      text: "🏠 Меню",
-      callback_data: "admin_menu",
-    },
   ]);
 
   await editMessageText(
@@ -2755,10 +2626,6 @@ async function handleTransferToJobs(
     {
       text: "📋 До заявок",
       callback_data: "requests_list",
-    },
-    {
-      text: "🏠 Меню",
-      callback_data: "admin_menu",
     },
   ]);
 
