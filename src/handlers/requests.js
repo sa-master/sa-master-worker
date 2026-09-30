@@ -31,6 +31,171 @@ const ESTIMATE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const UPLOAD_LINK_TTL_MS = 2 * 60 * 60 * 1000;
 
 /* =========================================================
+ * ADMIN: головне меню
+ * ========================================================= */
+
+async function sendAdminMenu(env, chatId = null, messageId = null) {
+  const render = chatId && messageId
+    ? (text, buttons) => editMessageText(env, chatId, messageId, text, buttons)
+    : (text, buttons) => sendMessageWithButtons(env, text, buttons);
+
+  const stats = await env.DB.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM requests) AS requests_total,
+      (SELECT COUNT(*) FROM requests WHERE status = 'new') AS requests_new,
+      (SELECT COUNT(*) FROM masters) AS masters_total,
+      (SELECT COUNT(*) FROM masters WHERE status = 'active') AS masters_active
+  `).first();
+
+  return render(
+    env,
+    [
+      "🛠 SA-MASTER",
+      "",
+      `📋 Заявки: ${stats?.requests_total || 0}`,
+      `🆕 Нові: ${stats?.requests_new || 0}`,
+      `👥 Майстри: ${stats?.masters_total || 0}`,
+      `🟢 Активні: ${stats?.masters_active || 0}`,
+      "",
+      "Оберіть розділ:",
+    ].join("\n"),
+    [
+      [
+        {
+          text: "📋 Заявки",
+          callback_data: "requests_list",
+        },
+        {
+          text: "👥 Майстри",
+          callback_data: "masters_list",
+        },
+      ],
+    ]
+  );
+}
+
+/* =========================================================
+ * ADMIN: заявки
+ * ========================================================= */
+
+async function sendRequestsMenu(env, chatId = null, messageId = null) {
+  const render = chatId && messageId
+    ? (text, buttons) => editMessageText(env, chatId, messageId, text, buttons)
+    : (text, buttons) => sendMessageWithButtons(env, text, buttons);
+  const rows = await env.DB.prepare(`
+    SELECT
+      id, request_code, name, phone, type, type_label,
+      location, status, created_at
+    FROM requests
+    ORDER BY id DESC
+    LIMIT 30
+  `).all();
+
+  const requests = rows.results || [];
+
+  if (!requests.length) {
+    return render(
+      [
+        "📋 ЗАЯВКИ",
+        "",
+        "У базі поки немає заявок.",
+      ].join("\n"),
+      [[
+        {
+          text: "⬅️ Головне меню",
+          callback_data: "admin_menu",
+        },
+      ]]
+    );
+  }
+
+  const buttons = requests.map((req) => [{
+    text: `${statusLabel(req.status)} · ${req.request_code} · ${req.name || "—"}`,
+    callback_data: `request_open:${req.request_code}`,
+  }]);
+
+  buttons.push([
+    {
+      text: "⬅️ Головне меню",
+      callback_data: "admin_menu",
+    },
+  ]);
+
+  return render(
+    [
+      "📋 ЗАЯВКИ",
+      "",
+      `Показано останніх: ${requests.length}`,
+      "",
+      "Оберіть заявку:",
+    ].join("\n"),
+    buttons
+  );
+}
+
+async function showRequestCard(env, callbackId, requestCode, workerOrigin, chatId, messageId) {
+  const req = await env.DB.prepare(`
+    SELECT *
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!req) {
+    await answerCallbackQuery(env, callbackId, "❌ Заявку не знайдено", true);
+    return;
+  }
+
+  const text = [
+    `🏠 ЗАЯВКА ${req.request_code}`,
+    "",
+    `👤 ${req.name || "—"}`,
+    `📞 ${req.phone || "—"}`,
+    `🔧 ${req.type_label || req.type || "—"}`,
+    `📍 ${req.location || "—"}`,
+    req.project ? `📐 Дизайн-проєкт: ${req.project}` : null,
+    req.timing ? `🗓 Початок: ${req.timing}` : null,
+    req.consultation_date ? `📅 Консультація: ${req.consultation_date}` : null,
+    `📊 Статус: ${statusLabel(req.status)}`,
+    req.notes ? `📝 ${req.notes}` : null,
+  ].filter(Boolean).join("\n");
+
+  const buttons = buildStatusButtons(
+    req.request_code,
+    req.status,
+    calculatorUrl(req.request_code, req.estimate_token, workerOrigin, env)
+  );
+
+  if (!req.transferred_to_jobs) {
+    buttons.push([{
+      text: "🤝 Передати в канал",
+      callback_data: `transfer_to_jobs:${req.request_code}`,
+    }]);
+  }
+
+  buttons.push([
+    {
+      text: "ℹ️ Деталі",
+      callback_data: `details:${req.request_code}`,
+    },
+  ]);
+
+  buttons.push([
+    {
+      text: "📋 До заявок",
+      callback_data: "requests_list",
+    },
+    {
+      text: "🏠 Меню",
+      callback_data: "admin_menu",
+    },
+  ]);
+
+  await editMessageText(env, chatId, messageId, text, buttons);
+  await answerCallbackQuery(env, callbackId, "");
+}
+
+/* =========================================================
  * ADMIN: майстри
  * ========================================================= */
 
@@ -54,7 +219,10 @@ async function getAdminMaster(env, masterId) {
   `).bind(masterId).first();
 }
 
-async function sendMastersMenu(env) {
+async function sendMastersMenu(env, chatId = null, messageId = null) {
+  const render = chatId && messageId
+    ? (text, buttons) => editMessageText(env, chatId, messageId, text, buttons)
+    : (text, buttons) => sendMessageWithButtons(env, text, buttons);
   const rows = await env.DB.prepare(`
     SELECT id, first_name, username, specializations, cities, status
     FROM masters
@@ -72,10 +240,18 @@ async function sendMastersMenu(env) {
   const masters = rows.results || [];
 
   if (!masters.length) {
-    return sendMessageWithButtons(
-      env,
-      ["👥 МАЙСТРИ", "", "У базі поки немає зареєстрованих майстрів."].join("\n"),
-      []
+    return render(
+      [
+        "👥 МАЙСТРИ",
+        "",
+        "У базі поки немає зареєстрованих майстрів.",
+      ].join("\n"),
+      [[
+        {
+          text: "⬅️ Головне меню",
+          callback_data: "admin_menu",
+        },
+      ]]
     );
   }
 
@@ -84,8 +260,14 @@ async function sendMastersMenu(env) {
     callback_data: `master_open:${m.id}`,
   }]);
 
-  return sendMessageWithButtons(
-    env,
+  buttons.push([
+    {
+      text: "⬅️ Головне меню",
+      callback_data: "admin_menu",
+    },
+  ]);
+
+  return render(
     [
       "👥 МАЙСТРИ SA-MASTER Jobs",
       "",
@@ -97,7 +279,7 @@ async function sendMastersMenu(env) {
   );
 }
 
-async function showMasterCard(env, callbackId, masterId) {
+async function showMasterCard(env, callbackId, masterId, chatId, messageId) {
   const master = await getAdminMaster(env, masterId);
 
   if (!master) {
@@ -150,9 +332,10 @@ async function showMasterCard(env, callbackId, masterId) {
 
   buttons.push([
     { text: "👥 До списку", callback_data: "masters_list" },
+    { text: "🏠 Меню", callback_data: "admin_menu" },
   ]);
 
-  await sendMessageWithButtons(env, text, buttons);
+  await editMessageText(env, chatId, messageId, text, buttons);
   await answerCallbackQuery(env, callbackId, "");
 }
 
@@ -269,12 +452,7 @@ async function unblockMaster(env, callbackId, masterId) {
   }
 }
 
-/*
- * Permanent delete is intentionally executed step-by-step rather than D1 batch.
- * This gives us the exact failing SQL step in Cloudflare logs and avoids one
- * bad optional cleanup statement hiding the real schema mismatch.
- */
-async function deleteMasterPermanently(env, callbackId, masterId) {
+async function deleteMasterPermanently(env, callbackId, masterId, chatId, messageId) {
   const master = await getAdminMaster(env, masterId);
 
   if (!master) {
@@ -385,8 +563,10 @@ async function deleteMasterPermanently(env, callbackId, masterId) {
     true
   );
 
-  await sendMessageWithButtons(
+  await editMessageText(
     env,
+    chatId,
+    messageId,
     [
       "🗑 МАЙСТРА ВИДАЛЕНО",
       "",
@@ -965,22 +1145,18 @@ export async function handleTelegramWebhook(request, env, headers) {
 
     const text = String(msg.text || "").trim();
 
-    if (text === "/start" || text === "/masters" || text === "👥 Майстри") {
-      await sendMessageWithButtons(
-        env,
-        [
-          "🛠 SA-MASTER",
-          "",
-          "Адміністрування заявок та майстрів.",
-          "",
-          "Оберіть розділ:",
-        ].join("\n"),
-        [[{
-          text: "👥 Майстри",
-          callback_data: "masters_list",
-        }]]
-      );
+    if (text === "/start") {
+      await sendAdminMenu(env);
+      return json({ ok: true }, headers);
+    }
 
+    if (text === "/masters" || text === "👥 Майстри") {
+      await sendMastersMenu(env);
+      return json({ ok: true }, headers);
+    }
+
+    if (text === "/requests" || text === "📋 Заявки") {
+      await sendRequestsMenu(env);
       return json({ ok: true }, headers);
     }
 
@@ -1003,28 +1179,52 @@ export async function handleTelegramWebhook(request, env, headers) {
   const messageId = cq.message?.message_id;
   const workerOrigin = new URL(request.url).origin;
 
+  if (data === "admin_menu") {
+    await answerCallbackQuery(env, cq.id, "");
+    await sendAdminMenu(env, chatId, messageId);
+    return json({ ok: true }, headers);
+  }
+
+  if (data === "requests_list") {
+    await answerCallbackQuery(env, cq.id, "");
+    await sendRequestsMenu(env, chatId, messageId);
+    return json({ ok: true }, headers);
+  }
+
+  if (data.startsWith("request_open:")) {
+    await showRequestCard(
+      env,
+      cq.id,
+      data.slice(13),
+      workerOrigin,
+      chatId,
+      messageId
+    );
+    return json({ ok: true }, headers);
+  }
+
   if (data === "masters_list") {
     await answerCallbackQuery(env, cq.id, "");
-    await sendMastersMenu(env);
+    await sendMastersMenu(env, chatId, messageId);
     return json({ ok: true }, headers);
   }
 
   if (data.startsWith("master_open:")) {
-    await showMasterCard(env, cq.id, Number(data.slice(12)));
+    await showMasterCard(env, cq.id, Number(data.slice(12)), chatId, messageId);
     return json({ ok: true }, headers);
   }
 
   if (data.startsWith("master_block:")) {
     const masterId = Number(data.slice(13));
     await blockMaster(env, cq.id, masterId);
-    await showMasterCard(env, cq.id, masterId);
+    await showMasterCard(env, cq.id, masterId, chatId, messageId);
     return json({ ok: true }, headers);
   }
 
   if (data.startsWith("master_unblock:")) {
     const masterId = Number(data.slice(15));
     await unblockMaster(env, cq.id, masterId);
-    await showMasterCard(env, cq.id, masterId);
+    await showMasterCard(env, cq.id, masterId, chatId, messageId);
     return json({ ok: true }, headers);
   }
 
@@ -1043,8 +1243,10 @@ export async function handleTelegramWebhook(request, env, headers) {
       ? `@${master.username}`
       : master.first_name || `Майстер #${master.id}`;
 
-    await sendMessageWithButtons(
+    await editMessageText(
       env,
+      chatId,
+      messageId,
       [
         "⚠️ ВИДАЛИТИ МАЙСТРА НАЗАВЖДИ?",
         "",
@@ -1068,12 +1270,12 @@ export async function handleTelegramWebhook(request, env, headers) {
 
   if (data.startsWith("master_delete_confirm:")) {
     const masterId = Number(data.slice(22));
-    await deleteMasterPermanently(env, cq.id, masterId);
+    await deleteMasterPermanently(env, cq.id, masterId, chatId, messageId);
     return json({ ok: true }, headers);
   }
 
   if (data.startsWith("details:")) {
-    return handleTelegramDetails(env, headers, data.slice(8), cq.id, chatId);
+    return handleTelegramDetails(env, headers, data.slice(8), cq.id, chatId, messageId);
   }
 
   if (data.startsWith("status:")) {
@@ -1131,7 +1333,7 @@ export async function handleTelegramWebhook(request, env, headers) {
   return json({ ok: true }, headers);
 }
 
-async function handleTelegramDetails(env, headers, requestCode, callbackId, chatId) {
+async function handleTelegramDetails(env, headers, requestCode, callbackId, chatId, messageId) {
   const req = await env.DB.prepare(`
     SELECT * FROM requests
     WHERE request_code = ?
@@ -1165,7 +1367,16 @@ async function handleTelegramDetails(env, headers, requestCode, callbackId, chat
     }
   }
 
-  await sendTelegram(env, lines.join("\n"));
+  await editMessageText(
+    env,
+    chatId,
+    messageId,
+    lines.join("\n"),
+    [[
+      { text: "⬅️ До заявки", callback_data: `request_open:${requestCode}` },
+      { text: "🏠 Меню", callback_data: "admin_menu" },
+    ]]
+  );
   await answerCallbackQuery(env, callbackId, "");
 
   return json({ ok: true }, headers);
@@ -1253,6 +1464,20 @@ async function handleTelegramStatusUpdate(
     calculatorUrl(req.request_code, req.estimate_token, workerOrigin, env)
   );
 
+  if (!req.transferred_to_jobs) {
+    buttons.push([{
+      text: "🤝 Передати в канал",
+      callback_data: `transfer_to_jobs:${req.request_code}`,
+    }]);
+  }
+
+  buttons.push([
+    {
+      text: "📋 До заявок",
+      callback_data: "requests_list",
+    },
+  ]);
+
   await editMessageText(env, chatId, messageId, text, buttons);
   await answerCallbackQuery(env, callbackId, `✅ ${newLabel}`);
 
@@ -1330,6 +1555,17 @@ async function handleTransferToJobs(
     req.status,
     calculatorUrl(req.request_code, req.estimate_token, workerOrigin, env)
   );
+
+  buttons.push([
+    {
+      text: "📋 До заявок",
+      callback_data: "requests_list",
+    },
+    {
+      text: "🏠 Меню",
+      callback_data: "admin_menu",
+    },
+  ]);
 
   await editMessageText(env, chatId, messageId, updatedText, buttons);
   await answerCallbackQuery(env, cq.id, "✅ Передано в канал майстрів");
