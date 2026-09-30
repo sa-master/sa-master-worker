@@ -304,13 +304,6 @@ async function deleteMasterPermanently(env, callbackId, masterId) {
       `).bind(master.telegram_id),
     },
     {
-      name: "master_request_drafts",
-      statement: env.DB.prepare(`
-        DELETE FROM master_request_drafts
-        WHERE telegram_id = ?
-      `).bind(master.telegram_id),
-    },
-    {
       name: "requests.source_master_id",
       statement: env.DB.prepare(`
         UPDATE requests
