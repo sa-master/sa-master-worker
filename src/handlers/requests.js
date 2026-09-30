@@ -50,6 +50,37 @@ function adminRenderer(env, chatId = null, messageId = null) {
     sendMessageWithButtons(env, text, buttons);
 }
 
+async function deleteIncomingCommand(env, msg) {
+  const chatId = msg?.chat?.id;
+  const messageId = msg?.message_id;
+
+  if (!env.BOT_TOKEN || chatId == null || messageId == null) return;
+
+  try {
+    const res = await fetch(
+      `https://api.telegram.org/bot${env.BOT_TOKEN}/deleteMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+        }),
+      }
+    );
+
+    const data = await res.json();
+    if (!data.ok) {
+      console.error(
+        "Telegram deleteMessage failed:",
+        data.description || data
+      );
+    }
+  } catch (err) {
+    console.error("Telegram deleteMessage error:", err);
+  }
+}
+
 /* =========================================================
  * ADMIN: головне меню
  * ========================================================= */
@@ -1742,6 +1773,7 @@ export async function handleTelegramWebhook(
       String(msg.text || "").trim();
 
     if (text === "/start") {
+      await deleteIncomingCommand(env, msg);
       await sendAdminMenu(env);
 
       return json(
@@ -1751,6 +1783,7 @@ export async function handleTelegramWebhook(
     }
 
     if (text === "/requests") {
+      await deleteIncomingCommand(env, msg);
       await sendRequestsMenu(env);
 
       return json(
@@ -1760,6 +1793,7 @@ export async function handleTelegramWebhook(
     }
 
     if (text === "/masters") {
+      await deleteIncomingCommand(env, msg);
       await sendMastersMenu(env);
 
       return json(
