@@ -1772,7 +1772,13 @@ export async function handleTelegramWebhook(
     const text =
       String(msg.text || "").trim();
 
-    if (text === "/start") {
+    // Адмін-команди навмисно розведені:
+    // /start    -> тільки статистика
+    // /requests -> тільки список заявок
+    // /masters  -> тільки список майстрів
+    const adminCommand = text.split("@")[0].toLowerCase();
+
+    if (adminCommand === "/start") {
       await deleteIncomingCommand(env, msg);
       await sendAdminMenu(env);
 
@@ -1782,7 +1788,7 @@ export async function handleTelegramWebhook(
       );
     }
 
-    if (text === "/requests") {
+    if (adminCommand === "/requests") {
       await deleteIncomingCommand(env, msg);
       await sendRequestsMenu(env);
 
@@ -1792,7 +1798,7 @@ export async function handleTelegramWebhook(
       );
     }
 
-    if (text === "/masters") {
+    if (adminCommand === "/masters") {
       await deleteIncomingCommand(env, msg);
       await sendMastersMenu(env);
 
