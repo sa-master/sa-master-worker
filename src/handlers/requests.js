@@ -82,6 +82,103 @@ async function deleteIncomingCommand(env, msg) {
 }
 
 /* =========================================================
+ * ADMIN: стан повідомлення статистики
+ * ========================================================= */
+
+async function ensureAdminUiStateTable(env) {
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS admin_ui_state (
+      chat_id TEXT PRIMARY KEY,
+      stats_message_id INTEGER,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+}
+
+async function rememberStatsMessage(env, chatId, messageId) {
+  if (chatId == null || messageId == null) return;
+
+  await ensureAdminUiStateTable(env);
+
+  await env.DB.prepare(`
+    INSERT INTO admin_ui_state (
+      chat_id,
+      stats_message_id,
+      updated_at
+    )
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(chat_id) DO UPDATE SET
+      stats_message_id = excluded.stats_message_id,
+      updated_at = CURRENT_TIMESTAMP
+  `).bind(
+    String(chatId),
+    Number(messageId)
+  ).run();
+}
+
+async function deleteTelegramMessage(env, chatId, messageId) {
+  if (!env.BOT_TOKEN || chatId == null || messageId == null) return;
+
+  try {
+    const res = await fetch(
+      `https://api.telegram.org/bot${env.BOT_TOKEN}/deleteMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+        }),
+      }
+    );
+
+    const data = await res.json();
+
+    if (
+      !data.ok &&
+      !String(data.description || "")
+        .includes("message to delete not found")
+    ) {
+      console.error(
+        "Telegram delete stats message failed:",
+        data.description || data
+      );
+    }
+  } catch (err) {
+    console.error(
+      "Telegram delete stats message error:",
+      err
+    );
+  }
+}
+
+async function removeStatsMessage(env, chatId) {
+  if (chatId == null) return;
+
+  await ensureAdminUiStateTable(env);
+
+  const row = await env.DB.prepare(`
+    SELECT stats_message_id
+    FROM admin_ui_state
+    WHERE chat_id = ?
+    LIMIT 1
+  `).bind(String(chatId)).first();
+
+  if (row?.stats_message_id != null) {
+    await deleteTelegramMessage(
+      env,
+      chatId,
+      row.stats_message_id
+    );
+  }
+
+  await env.DB.prepare(`
+    DELETE FROM admin_ui_state
+    WHERE chat_id = ?
+  `).bind(String(chatId)).run();
+}
+
+/* =========================================================
  * ADMIN: головне меню / статистика
  * ========================================================= */
 
@@ -1763,7 +1860,20 @@ export async function handleTelegramWebhook(
 
     if (adminCommand === "/start") {
       await deleteIncomingCommand(env, msg);
-      await sendAdminMenu(env);
+
+      // На /start статистика є окремим тимчасовим екраном.
+      // Спочатку прибираємо попередню статистику, якщо вона відома.
+      await removeStatsMessage(env, msg.chat?.id);
+
+      const sent = await sendAdminMenu(env);
+
+      if (sent?.ok && sent?.result?.message_id != null) {
+        await rememberStatsMessage(
+          env,
+          sent.result.chat?.id ?? msg.chat?.id ?? env.CHAT_ID,
+          sent.result.message_id
+        );
+      }
 
       return json(
         { ok: true },
@@ -1773,6 +1883,10 @@ export async function handleTelegramWebhook(
 
     if (adminCommand === "/requests") {
       await deleteIncomingCommand(env, msg);
+
+      // При переході до заявок прибираємо екран статистики.
+      await removeStatsMessage(env, msg.chat?.id);
+
       await sendRequestsMenu(env);
 
       return json(
@@ -1783,6 +1897,10 @@ export async function handleTelegramWebhook(
 
     if (adminCommand === "/masters") {
       await deleteIncomingCommand(env, msg);
+
+      // При переході до майстрів прибираємо екран статистики.
+      await removeStatsMessage(env, msg.chat?.id);
+
       await sendMastersMenu(env);
 
       return json(
