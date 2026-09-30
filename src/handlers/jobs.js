@@ -76,13 +76,7 @@ function masterDisplayName(master, fromUser = {}) {
     : (master?.first_name || fromUser?.first_name || `ID ${fromUser?.id || "—"}`);
 }
 
-async function saveEvent(
-  env,
-  req,
-  eventType,
-  content,
-  master
-) {
+async function saveEvent(env, req, eventType, content, master) {
   try {
     await env.DB.prepare(`
       INSERT INTO events (
@@ -515,13 +509,7 @@ export async function handleJobsWebhook(request, env, headers) {
       return json({ ok: true }, headers);
     }
 
-    return handleJoinMessage(
-      env,
-      headers,
-      chatId,
-      fromUser,
-      text
-    );
+    return handleJoinMessage(env, headers, chatId, fromUser, text);
   }
 
   if (!update.callback_query) {
@@ -668,13 +656,7 @@ export async function handleJobsWebhook(request, env, headers) {
 
   if (data.startsWith("not_agreed_reason:")) {
     const [, requestCode, reason] = data.split(":");
-    return handleNotAgreedReason(
-      env,
-      headers,
-      requestCode,
-      reason,
-      cq
-    );
+    return handleNotAgreedReason(env, headers, requestCode, reason, cq);
   }
 
   if (data.startsWith("job_started:")) {
@@ -787,11 +769,7 @@ async function handleTakeJob(env, headers, requestCode, cq) {
         AND transferred_to_jobs = 1
         AND assigned_master_id IS NULL
         AND status NOT IN ('cancelled', 'installation', 'completed')
-    `).bind(
-      telegramId,
-      masterName,
-      req.id
-    ).run();
+    `).bind(telegramId, masterName, req.id).run();
   } catch (err) {
     console.error("Take job failed:", err);
     await answerJobsCallback(env, cq.id, "❌ Помилка збереження", true);
@@ -853,19 +831,9 @@ async function handleTakeJob(env, headers, requestCode, cq) {
 
 /* =========================================================
  * Результат першого контакту
- *
- * Домовились НЕ означає, що монтаж уже почався.
- * Статус installation встановлюється тільки після
- * натискання "Роботи розпочато".
  * ========================================================= */
 
-async function handleMasterOutcome(
-  env,
-  headers,
-  requestCode,
-  outcome,
-  cq
-) {
+async function handleMasterOutcome(env, headers, requestCode, outcome, cq) {
   const telegramId = cq.from.id;
   const master = await getMasterByTelegramId(env, telegramId);
 
@@ -917,7 +885,7 @@ async function handleMasterOutcome(
         "",
         "Оберіть основну причину.",
         "",
-        "Після вибору причини заявка буде звільнена та знову стане доступною іншим майстрам.",
+        "Після вибору причини заявка буде оброблена відповідно до обраної причини.",
       ].join("\n"),
       buildMasterNotAgreedReasonButtons(req.request_code)
     );
@@ -925,14 +893,6 @@ async function handleMasterOutcome(
     return json({ ok: true }, headers);
   }
 
-  /*
-   * Домовились:
-   * заявка залишається закріпленою за майстром,
-   * але НЕ переходить у installation.
-   *
-   * Використовуємо існуючий статус approved,
-   * щоб не вимагати нової міграції БД.
-   */
   let updated;
 
   try {
@@ -1023,12 +983,7 @@ async function handleMasterOutcome(
  * Назад із вибору причини
  * ========================================================= */
 
-async function handleOutcomeBack(
-  env,
-  headers,
-  requestCode,
-  cq
-) {
+async function handleOutcomeBack(env, headers, requestCode, cq) {
   const telegramId = cq.from.id;
   const master = await getMasterByTelegramId(env, telegramId);
 
@@ -1047,29 +1002,64 @@ async function handleOutcomeBack(
 
   await answerJobsCallback(env, cq.id, "");
 
-  await sendToMaster(
-    env,
-    telegramId,
-    [
-      `🆔 ${req.request_code}`,
-      "",
-      "Після розмови позначте результат:",
-    ].join("\n"),
-    buildMasterOutcomeButtons(req.request_code)
-  );
+  /*
+   * Якщо домовленість уже була зафіксована, "Назад"
+   * повертає до кнопок погодженої заявки.
+   * Інакше — до первинного результату контакту.
+   */
+  if (req.status === "approved") {
+    await sendToMaster(
+      env,
+      telegramId,
+      [
+        "✅ ДОМОВИЛИСЬ",
+        "",
+        `🆔 ${req.request_code}`,
+        "",
+        "Домовленість із замовником зафіксовано.",
+      ].join("\n"),
+      buildAgreedJobButtons(req.request_code)
+    );
+  } else {
+    await sendToMaster(
+      env,
+      telegramId,
+      [
+        `🆔 ${req.request_code}`,
+        "",
+        "Після розмови позначте результат:",
+      ].join("\n"),
+      buildMasterOutcomeButtons(req.request_code)
+    );
+  }
 
   return json({ ok: true }, headers);
 }
 
 /* =========================================================
- * Причина "Не домовились"
+ * Причина "Не домовились" / "Співпраця не відбулась"
+ *
+ * Звичайні причини:
+ * - знімаємо майстра;
+ * - transferred_to_jobs лишається = 1;
+ * - заявка повертається в Jobs.
+ *
+ * client_declined:
+ * - знімаємо майстра;
+ * - transferred_to_jobs = 0;
+ * - заявка НЕ повертається майстрам;
+ * - адміністратор отримує її на перевірку.
+ *
+ * Також підтримуються старі callback:
+ * no_answer -> no_contact
+ * scope -> work_scope
  * ========================================================= */
 
 async function handleNotAgreedReason(
   env,
   headers,
   requestCode,
-  reason,
+  rawReason,
   cq
 ) {
   const telegramId = cq.from.id;
@@ -1080,11 +1070,18 @@ async function handleNotAgreedReason(
     return json({ ok: true }, headers);
   }
 
+  const reasonAliases = {
+    no_answer: "no_contact",
+    scope: "work_scope",
+  };
+
+  const reason = reasonAliases[rawReason] || rawReason;
+
   const reasonLabels = {
-    no_answer: "Не вдалося зв'язатися",
+    no_contact: "Не вдалося зв'язатися",
     price: "Не погодили вартість",
     timing: "Не погодили терміни",
-    scope: "Не підійшов обсяг / тип робіт",
+    work_scope: "Не підійшов обсяг / тип робіт",
     location: "Не підходить локація",
     client_declined: "Клієнт відмовився / неактуально",
     other: "Інша причина",
@@ -1114,21 +1111,37 @@ async function handleNotAgreedReason(
   }
 
   const masterName = masterDisplayName(master, cq.from);
+  const needsAdminReview = reason === "client_declined";
 
   let released;
 
   try {
-    released = await env.DB.prepare(`
-      UPDATE requests
-      SET
-        assigned_master_id = NULL,
-        assigned_master_name = NULL,
-        assigned_at = NULL,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-        AND assigned_master_id = ?
-        AND status NOT IN ('installation', 'completed', 'cancelled')
-    `).bind(req.id, telegramId).run();
+    if (needsAdminReview) {
+      released = await env.DB.prepare(`
+        UPDATE requests
+        SET
+          assigned_master_id = NULL,
+          assigned_master_name = NULL,
+          assigned_at = NULL,
+          transferred_to_jobs = 0,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND assigned_master_id = ?
+          AND status NOT IN ('installation', 'completed', 'cancelled')
+      `).bind(req.id, telegramId).run();
+    } else {
+      released = await env.DB.prepare(`
+        UPDATE requests
+        SET
+          assigned_master_id = NULL,
+          assigned_master_name = NULL,
+          assigned_at = NULL,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND assigned_master_id = ?
+          AND status NOT IN ('installation', 'completed', 'cancelled')
+      `).bind(req.id, telegramId).run();
+    }
   } catch (err) {
     console.error("Release not-agreed job failed:", err);
     await answerJobsCallback(
@@ -1155,12 +1168,54 @@ async function handleNotAgreedReason(
   await saveEvent(
     env,
     req,
-    "master_not_agreed",
-    `${masterName}: не домовились — ${reasonLabels[reason]}`,
+    needsAdminReview
+      ? "master_client_declined"
+      : "master_not_agreed",
+    needsAdminReview
+      ? `${masterName}: клієнт відмовився / заявка неактуальна — передано адміністратору на перевірку`
+      : `${masterName}: не домовились — ${reasonLabels[reason]}`,
     master
   );
 
   await answerJobsCallback(env, cq.id, "✅ Причину збережено");
+
+  if (needsAdminReview) {
+    await sendToMaster(
+      env,
+      telegramId,
+      [
+        "🕓 ЗАЯВКУ ПЕРЕДАНО НА ПЕРЕВІРКУ",
+        "",
+        `🆔 ${req.request_code}`,
+        "",
+        `📝 Причина: ${reasonLabels[reason]}`,
+        "",
+        "Заявка більше не закріплена за вами.",
+        "",
+        "Вона не повертається іншим майстрам до рішення адміністратора.",
+      ].join("\n"),
+      [
+        [{ text: "📋 Доступні заявки", callback_data: "jobs_list" }],
+        [{ text: "🏠 Головна", callback_data: "jobs_home" }],
+      ]
+    );
+
+    await notifyAdmin(env, [
+      "⚠️ SA-MASTER Jobs — ПОТРІБНА ПЕРЕВІРКА",
+      "",
+      `🆔 ${req.request_code}`,
+      `🙋 Майстер: ${masterName}`,
+      `👤 Клієнт: ${req.name || "—"}`,
+      `📞 ${req.phone || "—"}`,
+      "",
+      `📝 Причина: ${reasonLabels[reason]}`,
+      "",
+      "⏸ Заявку прибрано зі списку доступних майстрам.",
+      "👨‍💼 Потрібне рішення адміністратора.",
+    ]);
+
+    return json({ ok: true }, headers);
+  }
 
   await sendToMaster(
     env,
@@ -1199,12 +1254,7 @@ async function handleNotAgreedReason(
  * Роботи розпочато
  * ========================================================= */
 
-async function handleJobStarted(
-  env,
-  headers,
-  requestCode,
-  cq
-) {
+async function handleJobStarted(env, headers, requestCode, cq) {
   const telegramId = cq.from.id;
   const master = await getMasterByTelegramId(env, telegramId);
 
@@ -1231,10 +1281,6 @@ async function handleJobStarted(
     return json({ ok: true }, headers);
   }
 
-  /*
-   * Кнопка "Роботи розпочато" видається лише після agreed.
-   * Додаткова перевірка approved захищає від старих callback.
-   */
   if (req.status !== "approved") {
     await answerJobsCallback(
       env,
@@ -1311,15 +1357,10 @@ async function handleJobStarted(
 }
 
 /* =========================================================
- * Співпраця не відбулась після попередньої домовленості
+ * Співпраця не відбулась після домовленості
  * ========================================================= */
 
-async function handleCooperationFailed(
-  env,
-  headers,
-  requestCode,
-  cq
-) {
+async function handleCooperationFailed(env, headers, requestCode, cq) {
   const telegramId = cq.from.id;
   const master = await getMasterByTelegramId(env, telegramId);
 
@@ -1348,11 +1389,6 @@ async function handleCooperationFailed(
     return json({ ok: true }, headers);
   }
 
-  /*
-   * Не звільняємо заявку одразу.
-   * Спочатку обов'язково фіксуємо причину.
-   * Використовуємо той самий нейтральний перелік причин.
-   */
   await answerJobsCallback(env, cq.id, "");
 
   await sendToMaster(
@@ -1365,7 +1401,7 @@ async function handleCooperationFailed(
       "",
       "Оберіть основну причину.",
       "",
-      "Після вибору причини заявка буде звільнена та знову стане доступною іншим майстрам.",
+      "Після вибору причини заявка буде оброблена відповідно до обраної причини.",
     ].join("\n"),
     buildMasterNotAgreedReasonButtons(req.request_code)
   );
@@ -1377,12 +1413,7 @@ async function handleCooperationFailed(
  * Роботи завершено
  * ========================================================= */
 
-async function handleJobCompleted(
-  env,
-  headers,
-  requestCode,
-  cq
-) {
+async function handleJobCompleted(env, headers, requestCode, cq) {
   const telegramId = cq.from.id;
   const master = await getMasterByTelegramId(env, telegramId);
 
