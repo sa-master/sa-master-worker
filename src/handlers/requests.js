@@ -231,7 +231,9 @@ async function sendRequestsMenu(env, chatId = null, messageId = null) {
         "",
         "У базі поки немає заявок.",
       ].join("\n"),
-      []
+      [[
+        { text: "🏠 На головну", callback_data: "admin_menu" },
+      ]]
     );
   }
 
@@ -239,6 +241,10 @@ async function sendRequestsMenu(env, chatId = null, messageId = null) {
     text: `${statusLabel(req.status)} · ${req.request_code} · ${req.name || "—"}`,
     callback_data: `request_open:${req.request_code}`,
   }]);
+
+  buttons.push([
+    { text: "🏠 На головну", callback_data: "admin_menu" },
+  ]);
 
   return render(
     [
@@ -318,6 +324,7 @@ async function showRequestCard(
 
   buttons.push([
     { text: "📋 До заявок", callback_data: "requests_list" },
+    { text: "🏠 На головну", callback_data: "admin_menu" },
   ]);
 
   await editMessageText(
@@ -397,7 +404,9 @@ async function sendMastersMenu(env, chatId = null, messageId = null) {
         "",
         "У базі поки немає зареєстрованих майстрів.",
       ].join("\n"),
-      []
+      [[
+        { text: "🏠 На головну", callback_data: "admin_menu" },
+      ]]
     );
   }
 
@@ -413,6 +422,10 @@ async function sendMastersMenu(env, chatId = null, messageId = null) {
         `Майстер #${master.id}`}`,
     callback_data: `master_open:${master.id}`,
   }]);
+
+  buttons.push([
+    { text: "🏠 На головну", callback_data: "admin_menu" },
+  ]);
 
   return render(
     [
@@ -498,6 +511,7 @@ async function showMasterCard(
 
   buttons.push([
     { text: "👥 До списку", callback_data: "masters_list" },
+    { text: "🏠 На головну", callback_data: "admin_menu" },
   ]);
 
   await editMessageText(
@@ -836,6 +850,10 @@ async function deleteMasterPermanently(
       {
         text: "👥 До списку майстрів",
         callback_data: "masters_list",
+      },
+      {
+        text: "🏠 На головну",
+        callback_data: "admin_menu",
       },
     ]]
   );
@@ -2373,6 +2391,10 @@ async function handleTelegramDetails(
         callback_data:
           `request_open:${requestCode}`,
       },
+      {
+        text: "🏠 На головну",
+        callback_data: "admin_menu",
+      },
     ]]
   );
 
@@ -2575,6 +2597,10 @@ async function handleTelegramStatusUpdate(
       text: "📋 До заявок",
       callback_data: "requests_list",
     },
+    {
+      text: "🏠 На головну",
+      callback_data: "admin_menu",
+    },
   ]);
 
   await editMessageText(
@@ -2744,6 +2770,10 @@ async function handleTransferToJobs(
     {
       text: "📋 До заявок",
       callback_data: "requests_list",
+    },
+    {
+      text: "🏠 На головну",
+      callback_data: "admin_menu",
     },
   ]);
 
