@@ -52,6 +52,22 @@ async function getLatestApplication(env, telegramId) {
     .first();
 }
 
+async function safeAnswerJobsCallback(
+  env,
+  callbackId,
+  text = "",
+  showAlert = false
+) {
+  if (!callbackId) return null;
+
+  return answerJobsCallback(
+    env,
+    callbackId,
+    text,
+    showAlert
+  );
+}
+
 /* =========================================================
  * ГОЛОВНЕ МЕНЮ МАЙСТРА
  * ========================================================= */
@@ -79,7 +95,7 @@ async function sendActiveMasterMenu(env, chatId, master) {
       ? `, ${master.first_name}`
       : "";
 
-  await sendToMaster(
+  return sendToMaster(
     env,
     chatId,
     [
@@ -234,8 +250,7 @@ export async function handleJoinStart(
       !existing.phone &&
       (
         !existing.first_name ||
-        existing.first_name ===
-          fromUser.first_name
+        existing.first_name === fromUser.first_name
       )
     ) {
       await sendToMaster(
@@ -288,6 +303,10 @@ export async function handleJoinStart(
     );
   }
 
+  /*
+   * rejected/approved старої анкети не блокує нову реєстрацію,
+   * якщо профілю masters уже немає.
+   */
   await env.DB.prepare(`
     INSERT INTO master_applications (
       telegram_id,
@@ -350,6 +369,9 @@ export async function handleJoinMessage(
       fromUser.id
     );
 
+  /*
+   * Якщо профіль уже існує — анкета більше не обробляється.
+   */
   if (master) {
     return json(
       { ok: true },
@@ -369,9 +391,12 @@ export async function handleJoinMessage(
       .bind(fromUser.id)
       .first();
 
+  /*
+   * Звичайне повідомлення поза анкетою не є помилкою webhook.
+   */
   if (!app) {
     return json(
-      { ok: false },
+      { ok: true },
       headers
     );
   }
@@ -384,8 +409,7 @@ export async function handleJoinMessage(
     !app.phone &&
     (
       !app.first_name ||
-      app.first_name ===
-        fromUser.first_name
+      app.first_name === fromUser.first_name
     )
   ) {
     const firstName =
@@ -408,6 +432,7 @@ export async function handleJoinMessage(
       UPDATE master_applications
       SET first_name = ?
       WHERE id = ?
+        AND status = 'draft'
     `)
       .bind(
         firstName,
@@ -432,9 +457,11 @@ export async function handleJoinMessage(
    * ----------------------------------------------------- */
 
   if (!app.phone) {
+    const rawPhone =
+      String(text || "").trim();
+
     const digits =
-      String(text || "")
-        .replace(/\D/g, "");
+      rawPhone.replace(/\D/g, "");
 
     if (digits.length < 9) {
       await sendToMaster(
@@ -458,9 +485,10 @@ export async function handleJoinMessage(
       UPDATE master_applications
       SET phone = ?
       WHERE id = ?
+        AND status = 'draft'
     `)
       .bind(
-        String(text).trim(),
+        rawPhone,
         app.id
       )
       .run();
@@ -535,6 +563,7 @@ export async function handleJoinMessage(
       UPDATE master_applications
       SET specializations = ?
       WHERE id = ?
+        AND status = 'draft'
     `)
       .bind(
         spec,
@@ -579,6 +608,7 @@ export async function handleJoinMessage(
       UPDATE master_applications
       SET city = ?
       WHERE id = ?
+        AND status = 'draft'
     `)
       .bind(
         city,
@@ -623,6 +653,7 @@ export async function handleJoinMessage(
       UPDATE master_applications
       SET experience = ?
       WHERE id = ?
+        AND status = 'draft'
     `)
       .bind(
         experience,
@@ -663,18 +694,31 @@ export async function handleJoinMessage(
       );
     }
 
-    await env.DB.prepare(`
-      UPDATE master_applications
-      SET
-        about = ?,
-        status = 'pending'
-      WHERE id = ?
-    `)
-      .bind(
-        about,
-        app.id
-      )
-      .run();
+    /*
+     * Перехід draft -> pending робимо умовним.
+     * Це захищає від повторної обробки того самого кроку.
+     */
+    const submitted =
+      await env.DB.prepare(`
+        UPDATE master_applications
+        SET
+          about = ?,
+          status = 'pending'
+        WHERE id = ?
+          AND status = 'draft'
+      `)
+        .bind(
+          about,
+          app.id
+        )
+        .run();
+
+    if (!submitted.meta?.changes) {
+      return json(
+        { ok: true },
+        headers
+      );
+    }
 
     await sendToMaster(
       env,
@@ -701,15 +745,15 @@ export async function handleJoinMessage(
     const adminText = [
       "🆕 НОВА АНКЕТА МАЙСТРА",
       "",
-      `👤 ${appFull.first_name || "—"}`,
-      `📞 ${appFull.phone || "—"}`,
-      `🛠 ${appFull.specializations || "—"}`,
-      `🏙 ${appFull.city || "—"}`,
-      `📆 Досвід: ${appFull.experience || "—"}`,
-      `💬 ${appFull.about || "—"}`,
+      `👤 ${appFull?.first_name || "—"}`,
+      `📞 ${appFull?.phone || "—"}`,
+      `🛠 ${appFull?.specializations || "—"}`,
+      `🏙 ${appFull?.city || "—"}`,
+      `📆 Досвід: ${appFull?.experience || "—"}`,
+      `💬 ${appFull?.about || "—"}`,
       "",
-      `🆔 Telegram: ${appFull.telegram_id}`,
-      appFull.username
+      `🆔 Telegram: ${appFull?.telegram_id || fromUser.id}`,
+      appFull?.username
         ? `🔗 @${appFull.username}`
         : null,
     ]
@@ -771,7 +815,7 @@ export async function handleApplicationReview(
       .first();
 
   if (!app) {
-    await answerJobsCallback(
+    await safeAnswerJobsCallback(
       env,
       cq.id,
       "❌ Анкету не знайдено",
@@ -785,7 +829,7 @@ export async function handleApplicationReview(
   }
 
   if (app.status !== "pending") {
-    await answerJobsCallback(
+    await safeAnswerJobsCallback(
       env,
       cq.id,
       `⚠️ Вже оброблено: ${app.status}`,
@@ -817,25 +861,48 @@ export async function handleApplicationReview(
    * ----------------------------------------------------- */
 
   if (action === "reject") {
-    await env.DB.prepare(`
-      UPDATE master_applications
-      SET
-        status = 'rejected',
-        reviewed_at = CURRENT_TIMESTAMP
-      WHERE id = ?
-    `)
-      .bind(appId)
-      .run();
+    const rejected =
+      await env.DB.prepare(`
+        UPDATE master_applications
+        SET
+          status = 'rejected',
+          reviewed_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND status = 'pending'
+      `)
+        .bind(appId)
+        .run();
 
-    await sendToMaster(
-      env,
-      app.telegram_id,
-      [
-        "❌ На жаль, вашу анкету не схвалено.",
-        "",
-        "Дякуємо за інтерес до SA-MASTER Jobs.",
-      ].join("\n")
-    );
+    if (!rejected.meta?.changes) {
+      await safeAnswerJobsCallback(
+        env,
+        cq.id,
+        "⚠️ Анкету вже оброблено",
+        true
+      );
+
+      return json(
+        { ok: true },
+        headers
+      );
+    }
+
+    try {
+      await sendToMaster(
+        env,
+        app.telegram_id,
+        [
+          "❌ На жаль, вашу анкету не схвалено.",
+          "",
+          "Дякуємо за інтерес до SA-MASTER Jobs.",
+        ].join("\n")
+      );
+    } catch (err) {
+      console.error(
+        "Rejected application notification failed:",
+        err
+      );
+    }
 
     const rejectedText = [
       "❌ АНКЕТУ ВІДХИЛЕНО",
@@ -864,7 +931,7 @@ export async function handleApplicationReview(
       );
     }
 
-    await answerJobsCallback(
+    await safeAnswerJobsCallback(
       env,
       cq.id,
       "❌ Відхилено"
@@ -881,7 +948,7 @@ export async function handleApplicationReview(
    * ----------------------------------------------------- */
 
   if (action !== "approve") {
-    await answerJobsCallback(
+    await safeAnswerJobsCallback(
       env,
       cq.id,
       "❓ Невідома дія",
@@ -894,6 +961,10 @@ export async function handleApplicationReview(
     );
   }
 
+  /*
+   * telegram_id використовується лише для пошуку/зв'язку з Telegram.
+   * Внутрішні зв'язки системи повинні використовувати masters.id.
+   */
   const existingMaster =
     await getMasterByTelegramId(
       env,
@@ -901,32 +972,49 @@ export async function handleApplicationReview(
     );
 
   if (existingMaster) {
+    /*
+     * Не змінюємо blocked/inactive на active автоматично.
+     * Повторне схвалення анкети не повинно обходити адмінський статус.
+     */
     await env.DB.prepare(`
       UPDATE master_applications
       SET
         status = 'approved',
         reviewed_at = CURRENT_TIMESTAMP
       WHERE id = ?
+        AND status = 'pending'
     `)
       .bind(appId)
       .run();
 
-    await answerJobsCallback(
+    await safeAnswerJobsCallback(
       env,
       cq.id,
-      "⚠️ Профіль майстра вже існує",
+      existingMaster.status === MASTER_STATUS.ACTIVE
+        ? "⚠️ Профіль майстра вже існує"
+        : "⚠️ Профіль уже існує; його статус не змінено",
       true
     );
 
     return json(
-      { ok: true },
+      {
+        ok: true,
+        existing: true,
+        master_id: existingMaster.id,
+      },
       headers
     );
   }
 
+  /*
+   * Спочатку створюємо masters.
+   * Після цього отримуємо реальний внутрішній masters.id.
+   */
+  let insertedMasterId = null;
+
   try {
-    await env.DB.batch([
-      env.DB.prepare(`
+    const insertMaster =
+      await env.DB.prepare(`
         INSERT INTO masters (
           telegram_id,
           username,
@@ -938,12 +1026,22 @@ export async function handleApplicationReview(
           application_id,
           joined_at
         )
-        VALUES (
+        SELECT
           ?, ?, ?, ?, ?, ?,
           'active',
           ?,
           CURRENT_TIMESTAMP
+        WHERE EXISTS (
+          SELECT 1
+          FROM master_applications
+          WHERE id = ?
+            AND status = 'pending'
         )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM masters
+            WHERE telegram_id = ?
+          )
       `)
         .bind(
           app.telegram_id,
@@ -952,25 +1050,75 @@ export async function handleApplicationReview(
           app.phone || null,
           app.specializations || null,
           app.city || null,
-          app.id
-        ),
+          app.id,
+          app.id,
+          app.telegram_id
+        )
+        .run();
 
-      env.DB.prepare(`
-        UPDATE master_applications
-        SET
-          status = 'approved',
-          reviewed_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `)
-        .bind(appId),
-    ]);
+    if (insertMaster.meta?.changes) {
+      insertedMasterId =
+        insertMaster.meta?.last_row_id ||
+        null;
+    }
   } catch (err) {
     console.error(
-      "Master approval failed:",
+      "Master insert failed:",
       err
     );
 
-    await answerJobsCallback(
+    const raceMaster =
+      await getMasterByTelegramId(
+        env,
+        app.telegram_id
+      );
+
+    if (!raceMaster) {
+      await safeAnswerJobsCallback(
+        env,
+        cq.id,
+        "❌ Не вдалося створити профіль майстра",
+        true
+      );
+
+      return json(
+        { ok: true },
+        headers
+      );
+    }
+
+    insertedMasterId =
+      raceMaster.id;
+  }
+
+  const master =
+    insertedMasterId
+      ? await env.DB.prepare(`
+          SELECT
+            id,
+            telegram_id,
+            username,
+            first_name,
+            phone,
+            specializations,
+            cities,
+            status,
+            referral_token,
+            application_id,
+            joined_at
+          FROM masters
+          WHERE id = ?
+          LIMIT 1
+        `)
+          .bind(insertedMasterId)
+          .first()
+      : await getMasterByTelegramId(
+          env,
+          app.telegram_id
+        );
+
+  if (!master) {
+    await safeAnswerJobsCallback(
       env,
       cq.id,
       "❌ Не вдалося створити профіль майстра",
@@ -983,37 +1131,77 @@ export async function handleApplicationReview(
     );
   }
 
-  const master =
-    await getMasterByTelegramId(
-      env,
-      app.telegram_id
+  /*
+   * Анкету позначаємо approved лише після того,
+   * як профіль masters гарантовано існує.
+   */
+  try {
+    await env.DB.prepare(`
+      UPDATE master_applications
+      SET
+        status = 'approved',
+        reviewed_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+        AND status = 'pending'
+    `)
+      .bind(appId)
+      .run();
+  } catch (err) {
+    console.error(
+      "Application approval status update failed:",
+      err
     );
+
+    await safeAnswerJobsCallback(
+      env,
+      cq.id,
+      "⚠️ Профіль створено, але не вдалося оновити анкету",
+      true
+    );
+
+    return json(
+      {
+        ok: true,
+        master_id: master.id,
+        warning:
+          "APPLICATION_STATUS_UPDATE_FAILED",
+      },
+      headers
+    );
+  }
 
   /* -------------------------------------------------------
    * ПОВІДОМЛЕННЯ МАЙСТРУ
    * ----------------------------------------------------- */
 
-  await sendToMaster(
-    env,
-    app.telegram_id,
-    [
-      "✅ ВАС ПРИЙНЯТО ДО SA-MASTER Jobs!",
-      "",
-      "Ваш профіль активовано.",
-      "",
-      "Тепер ви можете:",
-      "",
-      "📋 переглядати доступні заявки прямо в боті",
-      "🤝 брати заявки, які вам підходять",
-      "📞 отримувати контакти клієнта після взяття заявки",
-      "➕ передавати власні заявки",
-      "",
-      "Номер телефону замовника не показується іншим майстрам, доки заявку не взято в роботу.",
-      "",
-      "Оберіть дію:",
-    ].join("\n"),
-    buildMasterMenuButtons()
-  );
+  try {
+    await sendToMaster(
+      env,
+      app.telegram_id,
+      [
+        "✅ ВАС ПРИЙНЯТО ДО SA-MASTER Jobs!",
+        "",
+        "Ваш профіль активовано.",
+        "",
+        "Тепер ви можете:",
+        "",
+        "📋 переглядати доступні заявки прямо в боті",
+        "🤝 брати заявки, які вам підходять",
+        "📞 отримувати контакти клієнта після взяття заявки",
+        "➕ передавати власні заявки",
+        "",
+        "Номер телефону замовника не показується іншим майстрам, доки заявку не взято в роботу.",
+        "",
+        "Оберіть дію:",
+      ].join("\n"),
+      buildMasterMenuButtons()
+    );
+  } catch (err) {
+    console.error(
+      "Approved master notification failed:",
+      err
+    );
+  }
 
   /* -------------------------------------------------------
    * ОНОВЛЕННЯ АДМІНСЬКОГО ПОВІДОМЛЕННЯ
@@ -1029,6 +1217,7 @@ export async function handleApplicationReview(
     `📆 ${app.experience || "—"}`,
     `💬 ${app.about || "—"}`,
     `🆔 Telegram: ${app.telegram_id}`,
+    `🔑 Master ID: ${master.id}`,
     "",
     `✅ Прийнято: ${now}`,
     "",
@@ -1039,16 +1228,23 @@ export async function handleApplicationReview(
     chatId != null &&
     messageId != null
   ) {
-    await editMessageText(
-      env,
-      chatId,
-      messageId,
-      approvedText,
-      []
-    );
+    try {
+      await editMessageText(
+        env,
+        chatId,
+        messageId,
+        approvedText,
+        []
+      );
+    } catch (err) {
+      console.error(
+        "Admin application message edit failed:",
+        err
+      );
+    }
   }
 
-  await answerJobsCallback(
+  await safeAnswerJobsCallback(
     env,
     cq.id,
     "✅ Прийнято!"
@@ -1057,8 +1253,7 @@ export async function handleApplicationReview(
   return json(
     {
       ok: true,
-      master_id:
-        master?.id || null,
+      master_id: master.id,
     },
     headers
   );
