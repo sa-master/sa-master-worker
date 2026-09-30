@@ -1755,11 +1755,23 @@ export async function handleTelegramWebhook(
       );
     }
 
-    /*
-     * Старі /masters та /requests спеціально не відкривають
-     * окремі екрани, щоб не плодити повідомлення.
-     * Вся навігація після /start — тільки через кнопки.
-     */
+    if (text === "/requests") {
+      await sendRequestsMenu(env);
+
+      return json(
+        { ok: true },
+        headers
+      );
+    }
+
+    if (text === "/masters") {
+      await sendMastersMenu(env);
+
+      return json(
+        { ok: true },
+        headers
+      );
+    }
 
     return json(
       { ok: true },
