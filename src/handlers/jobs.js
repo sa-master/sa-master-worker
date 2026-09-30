@@ -179,6 +179,7 @@ async function getMasterReferralLink(env, telegramId) {
 
   const url = new URL(SITE_URL);
   url.searchParams.set("ref", token);
+  url.searchParams.set("request", "1");
   return url.toString();
 }
 
