@@ -12,18 +12,9 @@ import {
   editMessageText,
   answerCallbackQuery,
 } from "../lib/telegram.js";
-import {
-  buildStatusButtons,
-  canChangeStatus,
-  formatRequestText,
-} from "../lib/telegram-buttons.js";
-import {
-  banMasterFromJobsGroup,
-  unbanMasterFromJobsGroup,
-  getJobsChatMember,
-  sendToMaster,
-} from "../lib/telegram-jobs.js";
-import { publishRequestToJobsGroup } from "./jobs.js";
+import { buildStatusButtons, canChangeStatus, formatRequestText } from "../lib/telegram-buttons.js";
+import { sendToMaster } from "../lib/telegram-jobs.js";
+import { publishRequestToJobs } from "./jobs.js";
 
 const CURRENT_YEAR = 2026;
 const ESTIMATE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -70,6 +61,7 @@ async function deleteIncomingCommand(env, msg) {
     );
 
     const data = await res.json();
+
     if (!data.ok) {
       console.error(
         "Telegram deleteMessage failed:",
@@ -110,10 +102,12 @@ async function rememberStatsMessage(env, chatId, messageId) {
     ON CONFLICT(chat_id) DO UPDATE SET
       stats_message_id = excluded.stats_message_id,
       updated_at = CURRENT_TIMESTAMP
-  `).bind(
-    String(chatId),
-    Number(messageId)
-  ).run();
+  `)
+    .bind(
+      String(chatId),
+      Number(messageId)
+    )
+    .run();
 }
 
 async function deleteTelegramMessage(env, chatId, messageId) {
@@ -162,7 +156,9 @@ async function removeStatsMessage(env, chatId) {
     FROM admin_ui_state
     WHERE chat_id = ?
     LIMIT 1
-  `).bind(String(chatId)).first();
+  `)
+    .bind(String(chatId))
+    .first();
 
   if (row?.stats_message_id != null) {
     await deleteTelegramMessage(
@@ -175,7 +171,9 @@ async function removeStatsMessage(env, chatId) {
   await env.DB.prepare(`
     DELETE FROM admin_ui_state
     WHERE chat_id = ?
-  `).bind(String(chatId)).run();
+  `)
+    .bind(String(chatId))
+    .run();
 }
 
 /* =========================================================
@@ -215,8 +213,15 @@ async function sendRequestsMenu(env, chatId = null, messageId = null) {
 
   const rows = await env.DB.prepare(`
     SELECT
-      id, request_code, name, phone, type, type_label,
-      location, status, created_at
+      id,
+      request_code,
+      name,
+      phone,
+      type,
+      type_label,
+      location,
+      status,
+      created_at
     FROM requests
     ORDER BY id DESC
     LIMIT 30
@@ -271,15 +276,19 @@ async function showRequestCard(
     FROM requests
     WHERE request_code = ?
     LIMIT 1
-  `).bind(requestCode).first();
+  `)
+    .bind(requestCode)
+    .first();
 
   if (!req) {
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      "❌ Заявку не знайдено",
-      true
-    );
+    if (callbackId) {
+      await answerCallbackQuery(
+        env,
+        callbackId,
+        "❌ Заявку не знайдено",
+        true
+      );
+    }
     return;
   }
 
@@ -296,8 +305,16 @@ async function showRequestCard(
       ? `📅 Консультація: ${req.consultation_date}`
       : null,
     `📊 Статус: ${statusLabel(req.status)}`,
+    req.transferred_to_jobs
+      ? "🤝 Доступна майстрам SA-MASTER Jobs"
+      : null,
+    req.assigned_master_name
+      ? `🙋 Майстер: ${req.assigned_master_name}`
+      : null,
     req.notes ? `📝 ${req.notes}` : null,
-  ].filter(Boolean).join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   const buttons = buildStatusButtons(
     req.request_code,
@@ -312,7 +329,7 @@ async function showRequestCard(
 
   if (!req.transferred_to_jobs) {
     buttons.push([{
-      text: "🤝 Передати в канал",
+      text: "🤝 Передати майстрам",
       callback_data: `transfer_to_jobs:${req.request_code}`,
     }]);
   }
@@ -335,7 +352,9 @@ async function showRequestCard(
     buttons
   );
 
-  await answerCallbackQuery(env, callbackId, "");
+  if (callbackId) {
+    await answerCallbackQuery(env, callbackId, "");
+  }
 }
 
 /* =========================================================
@@ -369,7 +388,9 @@ async function getAdminMaster(env, masterId) {
     FROM masters
     WHERE id = ?
     LIMIT 1
-  `).bind(masterId).first();
+  `)
+    .bind(masterId)
+    .first();
 }
 
 async function sendMastersMenu(env, chatId = null, messageId = null) {
@@ -449,28 +470,15 @@ async function showMasterCard(
   const master = await getAdminMaster(env, masterId);
 
   if (!master) {
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      "❌ Майстра не знайдено",
-      true
-    );
+    if (callbackId) {
+      await answerCallbackQuery(
+        env,
+        callbackId,
+        "❌ Майстра не знайдено",
+        true
+      );
+    }
     return;
-  }
-
-  let tgStatus = "—";
-
-  try {
-    const member = await getJobsChatMember(
-      env,
-      master.telegram_id
-    );
-
-    tgStatus = member?.ok
-      ? (member.result?.status || "—")
-      : `помилка: ${member?.description || "невідомо"}`;
-  } catch {
-    tgStatus = "помилка перевірки";
   }
 
   const text = [
@@ -483,7 +491,6 @@ async function showMasterCard(
     `🏙 ${master.cities || "—"}`,
     `🆔 Telegram: ${master.telegram_id}`,
     `📊 Статус: ${adminMasterStatusLabel(master.status)}`,
-    `👥 Telegram-група: ${tgStatus}`,
     "",
     `✅ Успішні заявки: ${master.good_deals_count || 0}`,
     `📵 Не відповіли: ${master.no_answer_count || 0}`,
@@ -497,9 +504,12 @@ async function showMasterCard(
       text: "🚫 Заблокувати",
       callback_data: `master_block:${master.id}`,
     }]);
-  } else if (master.status === "blocked") {
+  } else if (
+    master.status === "blocked" ||
+    master.status === "inactive"
+  ) {
     buttons.push([{
-      text: "✅ Розблокувати",
+      text: "✅ Активувати",
       callback_data: `master_unblock:${master.id}`,
     }]);
   }
@@ -522,7 +532,9 @@ async function showMasterCard(
     buttons
   );
 
-  await answerCallbackQuery(env, callbackId, "");
+  if (callbackId) {
+    await answerCallbackQuery(env, callbackId, "");
+  }
 }
 
 async function blockMaster(env, callbackId, masterId) {
@@ -548,21 +560,6 @@ async function blockMaster(env, callbackId, masterId) {
     return false;
   }
 
-  const ban = await banMasterFromJobsGroup(
-    env,
-    master.telegram_id
-  );
-
-  if (!ban?.ok) {
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      `❌ Telegram: ${ban?.description || "не вдалося заблокувати"}`,
-      true
-    );
-    return false;
-  }
-
   try {
     await env.DB.prepare(`
       UPDATE masters
@@ -570,21 +567,11 @@ async function blockMaster(env, callbackId, masterId) {
         status = 'blocked',
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).bind(master.id).run();
+    `)
+      .bind(master.id)
+      .run();
   } catch (err) {
     console.error("DB block master failed:", err);
-
-    try {
-      await unbanMasterFromJobsGroup(
-        env,
-        master.telegram_id
-      );
-    } catch (rollbackErr) {
-      console.error(
-        "Rollback unban after DB error failed:",
-        rollbackErr
-      );
-    }
 
     await answerCallbackQuery(
       env,
@@ -604,7 +591,8 @@ async function blockMaster(env, callbackId, masterId) {
         "🚫 ДОСТУП ДО SA-MASTER Jobs ЗАБЛОКОВАНО",
         "",
         "Ваш профіль заблоковано адміністратором.",
-        "Доступ до групи заявок та отримання заявок вимкнено.",
+        "",
+        "Ви більше не можете переглядати, брати або передавати заявки.",
         "",
         "Для відновлення доступу зверніться до адміністратора.",
       ].join("\n")
@@ -648,21 +636,6 @@ async function unblockMaster(env, callbackId, masterId) {
     return false;
   }
 
-  const unban = await unbanMasterFromJobsGroup(
-    env,
-    master.telegram_id
-  );
-
-  if (!unban?.ok) {
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      `❌ Telegram: ${unban?.description || "не вдалося розблокувати"}`,
-      true
-    );
-    return false;
-  }
-
   try {
     await env.DB.prepare(`
       UPDATE masters
@@ -670,9 +643,11 @@ async function unblockMaster(env, callbackId, masterId) {
         status = 'active',
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).bind(master.id).run();
+    `)
+      .bind(master.id)
+      .run();
   } catch (err) {
-    console.error("DB unblock master failed:", err);
+    console.error("DB activate master failed:", err);
 
     await answerCallbackQuery(
       env,
@@ -692,12 +667,14 @@ async function unblockMaster(env, callbackId, masterId) {
         "✅ ДОСТУП ДО SA-MASTER Jobs ВІДНОВЛЕНО",
         "",
         "Ваш профіль знову активний.",
-        "Відкрийте бота /start та отримайте нове запрошення до групи заявок.",
+        "",
+        "Відкрийте бота та натисніть /start.",
+        "Доступні заявки знову можна переглядати прямо в боті.",
       ].join("\n")
     );
   } catch (err) {
     console.error(
-      "Unblocked master notification failed:",
+      "Activated master notification failed:",
       err
     );
   }
@@ -705,7 +682,7 @@ async function unblockMaster(env, callbackId, masterId) {
   await answerCallbackQuery(
     env,
     callbackId,
-    "✅ Майстра розблоковано"
+    "✅ Майстра активовано"
   );
 
   return true;
@@ -728,25 +705,6 @@ async function deleteMasterPermanently(
       true
     );
     return false;
-  }
-
-  try {
-    const ban = await banMasterFromJobsGroup(
-      env,
-      master.telegram_id
-    );
-
-    if (!ban?.ok) {
-      console.error(
-        "Telegram cleanup before master delete failed:",
-        ban?.description || ban
-      );
-    }
-  } catch (err) {
-    console.error(
-      "Telegram cleanup before master delete failed:",
-      err
-    );
   }
 
   const cleanupSteps = [
@@ -984,7 +942,9 @@ export async function handleCreateRequest(
         WHERE referral_token = ?
           AND status = 'active'
         LIMIT 1
-      `).bind(referralToken).first();
+      `)
+        .bind(referralToken)
+        .first();
 
       if (sourceMaster) {
         sourceType = "master";
@@ -1024,7 +984,9 @@ export async function handleCreateRequest(
       SET value = value + 1
       WHERE name = ?
       RETURNING value
-    `).bind(`request_${CURRENT_YEAR}`).first();
+    `)
+      .bind(`request_${CURRENT_YEAR}`)
+      .first();
 
     if (
       !seq ||
@@ -1046,7 +1008,9 @@ export async function handleCreateRequest(
         FROM clients
         WHERE phone = ?
         LIMIT 1
-      `).bind(normalizedPhone).first();
+      `)
+        .bind(normalizedPhone)
+        .first();
 
     if (existingClient) {
       clientId = existingClient.id;
@@ -1054,10 +1018,12 @@ export async function handleCreateRequest(
       const ins = await env.DB.prepare(`
         INSERT INTO clients (name, phone)
         VALUES (?, ?)
-      `).bind(
-        name,
-        normalizedPhone
-      ).run();
+      `)
+        .bind(
+          name,
+          normalizedPhone
+        )
+        .run();
 
       clientId =
         ins.meta?.last_row_id || null;
@@ -1095,26 +1061,28 @@ export async function handleCreateRequest(
           ?, ?,
           ?, ?
         )
-      `).bind(
-        requestCode,
-        type,
-        typeLabel,
-        name,
-        normalizedPhone,
-        location || null,
-        timing || null,
-        project || null,
-        consultation || null,
-        source,
-        sourceType,
-        sourceMasterId,
-        clientId,
-        notes || null,
-        estimateToken,
-        estimateTokenExpiresAt,
-        uploadToken,
-        uploadTokenExpiresAt
-      ).run();
+      `)
+        .bind(
+          requestCode,
+          type,
+          typeLabel,
+          name,
+          normalizedPhone,
+          location || null,
+          timing || null,
+          project || null,
+          consultation || null,
+          source,
+          sourceType,
+          sourceMasterId,
+          clientId,
+          notes || null,
+          estimateToken,
+          estimateTokenExpiresAt,
+          uploadToken,
+          uploadTokenExpiresAt
+        )
+        .run();
 
     if (!insertResult.meta?.last_row_id) {
       return error(
@@ -1142,7 +1110,9 @@ export async function handleCreateRequest(
         'Створено заявку',
         'system'
       )
-    `).bind(requestId).run();
+    `)
+      .bind(requestId)
+      .run();
 
     if (sourceMasterId) {
       await env.DB.prepare(`
@@ -1162,10 +1132,12 @@ export async function handleCreateRequest(
           'master',
           ?
         )
-      `).bind(
-        requestId,
-        String(sourceMasterId)
-      ).run();
+      `)
+        .bind(
+          requestId,
+          String(sourceMasterId)
+        )
+        .run();
     }
   } catch (err) {
     console.error(
@@ -1222,7 +1194,9 @@ export async function handleCreateRequest(
     notes
       ? `📝 Опис: ${notes}`
       : null,
-  ].filter(Boolean).join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   const buttons = buildStatusButtons(
     requestCode,
@@ -1236,9 +1210,8 @@ export async function handleCreateRequest(
   );
 
   buttons.push([{
-    text: "🤝 Передати в канал",
-    callback_data:
-      `transfer_to_jobs:${requestCode}`,
+    text: "🤝 Передати майстрам",
+    callback_data: `transfer_to_jobs:${requestCode}`,
   }]);
 
   const tg = await sendMessageWithButtons(
@@ -1310,10 +1283,12 @@ export async function handleGetCalculatorRequest(
       AND estimate_token = ?
       AND datetime(estimate_token_expires_at) > CURRENT_TIMESTAMP
     LIMIT 1
-  `).bind(
-    requestCode,
-    token
-  ).first();
+  `)
+    .bind(
+      requestCode,
+      token
+    )
+    .first();
 
   if (!row) {
     return error(
@@ -1365,10 +1340,12 @@ export async function handleListRequests(
     ORDER BY r.id DESC
     LIMIT ?
     OFFSET ?
-  `).bind(
-    limit,
-    offset
-  ).all();
+  `)
+    .bind(
+      limit,
+      offset
+    )
+    .all();
 
   return json({
     ok: true,
@@ -1404,7 +1381,9 @@ export async function handleGetRequest(
       ON o.id = r.object_id
     WHERE r.request_code = ?
     LIMIT 1
-  `).bind(requestCode).first();
+  `)
+    .bind(requestCode)
+    .first();
 
   if (!row) {
     return error(
@@ -1472,7 +1451,9 @@ export async function handleUpdateStatus(
     FROM requests
     WHERE request_code = ?
     LIMIT 1
-  `).bind(requestCode).first();
+  `)
+    .bind(requestCode)
+    .first();
 
   if (!current) {
     return error(
@@ -1602,9 +1583,9 @@ export async function handleUpdateStatus(
       FROM objects
       WHERE id = ?
       LIMIT 1
-    `).bind(
-      current.object_id
-    ).first();
+    `)
+      .bind(current.object_id)
+      .first();
 
     if (object) {
       object.status_label =
@@ -1655,7 +1636,9 @@ export async function handleGetEvents(
     FROM requests
     WHERE request_code = ?
     LIMIT 1
-  `).bind(requestCode).first();
+  `)
+    .bind(requestCode)
+    .first();
 
   if (!current) {
     return error(
@@ -1678,7 +1661,9 @@ export async function handleGetEvents(
     FROM events
     WHERE request_id = ?
     ORDER BY id ASC
-  `).bind(current.id).all();
+  `)
+    .bind(current.id)
+    .all();
 
   return json({
     ok: true,
@@ -1709,7 +1694,9 @@ export async function handleAttachClient(
     FROM requests
     WHERE request_code = ?
     LIMIT 1
-  `).bind(requestCode).first();
+  `)
+    .bind(requestCode)
+    .first();
 
   if (!req) {
     return error(
@@ -1728,9 +1715,9 @@ export async function handleAttachClient(
       FROM clients
       WHERE id = ?
       LIMIT 1
-    `).bind(
-      req.client_id
-    ).first();
+    `)
+      .bind(req.client_id)
+      .first();
 
     return json({
       ok: true,
@@ -1760,9 +1747,9 @@ export async function handleAttachClient(
     FROM clients
     WHERE phone = ?
     LIMIT 1
-  `).bind(
-    normalizedPhone
-  ).first();
+  `)
+    .bind(normalizedPhone)
+    .first();
 
   let created = false;
 
@@ -1773,10 +1760,12 @@ export async function handleAttachClient(
         phone
       )
       VALUES (?, ?)
-    `).bind(
-      req.name || "—",
-      normalizedPhone
-    ).run();
+    `)
+      .bind(
+        req.name || "—",
+        normalizedPhone
+      )
+      .run();
 
     if (!ins.meta?.last_row_id) {
       return error(
@@ -1794,9 +1783,9 @@ export async function handleAttachClient(
       FROM clients
       WHERE id = ?
       LIMIT 1
-    `).bind(
-      ins.meta.last_row_id
-    ).first();
+    `)
+      .bind(ins.meta.last_row_id)
+      .first();
 
     created = true;
   }
@@ -1807,10 +1796,12 @@ export async function handleAttachClient(
       client_id = ?,
       updated_at = CURRENT_TIMESTAMP
     WHERE id = ?
-  `).bind(
-    client.id,
-    req.id
-  ).run();
+  `)
+    .bind(
+      client.id,
+      req.id
+    )
+    .run();
 
   return json({
     ok: true,
@@ -1846,15 +1837,7 @@ export async function handleTelegramWebhook(
   }
 
   /* -------------------------------------------------------
-   * Звичайні повідомлення / команди.
-   *
-   * ВАЖЛИВО:
-   * /start    -> ТІЛЬКИ статистика.
-   * /requests -> ТІЛЬКИ список заявок.
-   * /masters  -> ТІЛЬКИ список майстрів.
-   *
-   * Немає admin_ui_state і немає автоматичного виклику
-   * sendAdminMenu() з /requests або /masters.
+   * Звичайні повідомлення / команди
    * ----------------------------------------------------- */
 
   if (update.message) {
@@ -1874,21 +1857,30 @@ export async function handleTelegramWebhook(
       String(msg.text || "").trim();
 
     const adminCommand =
-      text.split(/\s+/)[0].split("@")[0].toLowerCase();
+      text.split(/\s+/)[0]
+        .split("@")[0]
+        .toLowerCase();
 
     if (adminCommand === "/start") {
       await deleteIncomingCommand(env, msg);
 
-      // На /start статистика є окремим тимчасовим екраном.
-      // Спочатку прибираємо попередню статистику, якщо вона відома.
-      await removeStatsMessage(env, msg.chat?.id);
+      await removeStatsMessage(
+        env,
+        msg.chat?.id
+      );
 
-      const sent = await sendAdminMenu(env);
+      const sent =
+        await sendAdminMenu(env);
 
-      if (sent?.ok && sent?.result?.message_id != null) {
+      if (
+        sent?.ok &&
+        sent?.result?.message_id != null
+      ) {
         await rememberStatsMessage(
           env,
-          sent.result.chat?.id ?? msg.chat?.id ?? env.CHAT_ID,
+          sent.result.chat?.id ??
+            msg.chat?.id ??
+            env.CHAT_ID,
           sent.result.message_id
         );
       }
@@ -1902,8 +1894,10 @@ export async function handleTelegramWebhook(
     if (adminCommand === "/requests") {
       await deleteIncomingCommand(env, msg);
 
-      // При переході до заявок прибираємо екран статистики.
-      await removeStatsMessage(env, msg.chat?.id);
+      await removeStatsMessage(
+        env,
+        msg.chat?.id
+      );
 
       await sendRequestsMenu(env);
 
@@ -1916,8 +1910,10 @@ export async function handleTelegramWebhook(
     if (adminCommand === "/masters") {
       await deleteIncomingCommand(env, msg);
 
-      // При переході до майстрів прибираємо екран статистики.
-      await removeStatsMessage(env, msg.chat?.id);
+      await removeStatsMessage(
+        env,
+        msg.chat?.id
+      );
 
       await sendMastersMenu(env);
 
@@ -2332,7 +2328,9 @@ async function handleTelegramDetails(
     FROM requests
     WHERE request_code = ?
     LIMIT 1
-  `).bind(requestCode).first();
+  `)
+    .bind(requestCode)
+    .first();
 
   if (!req) {
     await answerCallbackQuery(
@@ -2356,14 +2354,22 @@ async function handleTelegramDetails(
     FROM events
     WHERE request_id = ?
     ORDER BY id ASC
-  `).bind(req.id).all();
+  `)
+    .bind(req.id)
+    .all();
 
   const lines = [
     formatRequestText(req),
     "",
     `🕐 Створено: ${req.created_at || "—"}`,
     `🕐 Оновлено: ${req.updated_at || "—"}`,
-  ];
+    req.transferred_to_jobs
+      ? "🤝 SA-MASTER Jobs: передано майстрам"
+      : "🤝 SA-MASTER Jobs: не передано",
+    req.assigned_master_name
+      ? `🙋 Закріплено за: ${req.assigned_master_name}`
+      : null,
+  ].filter(Boolean);
 
   if (events.results?.length) {
     lines.push(
@@ -2449,7 +2455,9 @@ async function handleTelegramStatusUpdate(
     FROM requests
     WHERE request_code = ?
     LIMIT 1
-  `).bind(requestCode).first();
+  `)
+    .bind(requestCode)
+    .first();
 
   if (!current) {
     await answerCallbackQuery(
@@ -2551,7 +2559,9 @@ async function handleTelegramStatusUpdate(
     FROM requests
     WHERE id = ?
     LIMIT 1
-  `).bind(current.id).first();
+  `)
+    .bind(current.id)
+    .first();
 
   const text = [
     `🏠 ЗАЯВКА ${req.request_code}`,
@@ -2561,11 +2571,19 @@ async function handleTelegramStatusUpdate(
     `🔧 ${req.type_label || req.type || "—"}`,
     `📍 ${req.location || "—"}`,
     `📊 Статус: ${newLabel}`,
+    req.transferred_to_jobs
+      ? "🤝 Доступна майстрам SA-MASTER Jobs"
+      : null,
+    req.assigned_master_name
+      ? `🙋 Майстер: ${req.assigned_master_name}`
+      : null,
     `🕐 Оновлено: ${new Date().toLocaleString(
       "uk-UA",
       { timeZone: "Europe/Kyiv" }
     )}`,
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 
   const buttons = buildStatusButtons(
     req.request_code,
@@ -2580,16 +2598,14 @@ async function handleTelegramStatusUpdate(
 
   if (!req.transferred_to_jobs) {
     buttons.push([{
-      text: "🤝 Передати в канал",
-      callback_data:
-        `transfer_to_jobs:${req.request_code}`,
+      text: "🤝 Передати майстрам",
+      callback_data: `transfer_to_jobs:${req.request_code}`,
     }]);
   }
 
   buttons.push([{
     text: "ℹ️ Деталі",
-    callback_data:
-      `details:${req.request_code}`,
+    callback_data: `details:${req.request_code}`,
   }]);
 
   buttons.push([
@@ -2624,7 +2640,10 @@ async function handleTelegramStatusUpdate(
 }
 
 /* =========================================================
- * TELEGRAM: передача заявки в Jobs
+ * TELEGRAM: передача заявки майстрам SA-MASTER Jobs
+ *
+ * Група більше не використовується.
+ * publishRequestToJobs() робить заявку доступною в Jobs-боті.
  * ========================================================= */
 
 async function handleTransferToJobs(
@@ -2641,7 +2660,9 @@ async function handleTransferToJobs(
     FROM requests
     WHERE request_code = ?
     LIMIT 1
-  `).bind(requestCode).first();
+  `)
+    .bind(requestCode)
+    .first();
 
   if (!req) {
     await answerCallbackQuery(
@@ -2661,7 +2682,7 @@ async function handleTransferToJobs(
     await answerCallbackQuery(
       env,
       cq.id,
-      "⚠️ Уже передано в канал",
+      "⚠️ Заявка вже доступна майстрам",
       true
     );
 
@@ -2672,21 +2693,21 @@ async function handleTransferToJobs(
   }
 
   const result =
-    await publishRequestToJobsGroup(
+    await publishRequestToJobs(
       env,
       req
     );
 
   if (!result.ok) {
     console.error(
-      "Publish to jobs group failed:",
+      "Publish to SA-MASTER Jobs failed:",
       result.description || result
     );
 
     await answerCallbackQuery(
       env,
       cq.id,
-      "❌ Не вдалося опублікувати",
+      "❌ Не вдалося передати заявку",
       true
     );
 
@@ -2696,53 +2717,66 @@ async function handleTransferToJobs(
     );
   }
 
-  try {
-    await env.DB.batch([
-      env.DB.prepare(`
-        UPDATE requests
-        SET
-          transferred_to_jobs = 1,
-          transferred_at = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).bind(req.id),
+  /*
+   * publishRequestToJobs() уже виставив:
+   *
+   * transferred_to_jobs = 1
+   * transferred_at
+   * updated_at
+   *
+   * Тут НЕ дублюємо UPDATE.
+   * Додаємо лише подію.
+   */
 
-      env.DB.prepare(`
-        INSERT INTO events (
-          object_id,
-          request_id,
-          event_type,
-          content,
-          author_type
-        )
-        VALUES (
-          ?,
-          ?,
-          'transferred_to_jobs',
-          'Передано в канал майстрів',
-          'system'
-        )
-      `).bind(
+  try {
+    await env.DB.prepare(`
+      INSERT INTO events (
+        object_id,
+        request_id,
+        event_type,
+        content,
+        author_type
+      )
+      VALUES (
+        ?,
+        ?,
+        'transferred_to_jobs',
+        'Передано майстрам SA-MASTER Jobs',
+        'system'
+      )
+    `)
+      .bind(
         req.object_id || null,
         req.id
-      ),
-    ]);
+      )
+      .run();
   } catch (err) {
     console.error(
-      "Mark as transferred failed:",
+      "Save transferred_to_jobs event failed:",
       err
     );
   }
 
+  const updated = await env.DB.prepare(`
+    SELECT *
+    FROM requests
+    WHERE id = ?
+    LIMIT 1
+  `)
+    .bind(req.id)
+    .first();
+
   const updatedText = [
-    `🏠 ЗАЯВКА ${req.request_code}`,
+    `🏠 ЗАЯВКА ${updated.request_code}`,
     "",
-    `👤 ${req.name || "—"}`,
-    `📞 ${req.phone || "—"}`,
-    `🔧 ${req.type_label || req.type || "—"}`,
-    `📍 ${req.location || "—"}`,
-    `📊 Статус: ${statusLabel(req.status)}`,
-    "🤝 Передано в канал майстрів",
+    `👤 ${updated.name || "—"}`,
+    `📞 ${updated.phone || "—"}`,
+    `🔧 ${updated.type_label || updated.type || "—"}`,
+    `📍 ${updated.location || "—"}`,
+    `📊 Статус: ${statusLabel(updated.status)}`,
+    "",
+    "🤝 Передано майстрам SA-MASTER Jobs",
+    "📋 Заявка тепер доступна у Jobs-боті.",
     `🕐 ${new Date().toLocaleString(
       "uk-UA",
       { timeZone: "Europe/Kyiv" }
@@ -2750,11 +2784,11 @@ async function handleTransferToJobs(
   ].join("\n");
 
   const buttons = buildStatusButtons(
-    req.request_code,
-    req.status,
+    updated.request_code,
+    updated.status,
     calculatorUrl(
-      req.request_code,
-      req.estimate_token,
+      updated.request_code,
+      updated.estimate_token,
       workerOrigin,
       env
     )
@@ -2762,8 +2796,7 @@ async function handleTransferToJobs(
 
   buttons.push([{
     text: "ℹ️ Деталі",
-    callback_data:
-      `details:${req.request_code}`,
+    callback_data: `details:${updated.request_code}`,
   }]);
 
   buttons.push([
@@ -2788,7 +2821,7 @@ async function handleTransferToJobs(
   await answerCallbackQuery(
     env,
     cq.id,
-    "✅ Передано в канал майстрів"
+    "✅ Передано майстрам"
   );
 
   return json(
