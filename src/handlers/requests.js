@@ -73,10 +73,6 @@ async function sendAdminMenu(env, chatId = null, messageId = null) {
       `🆕 Нові: ${stats?.requests_new || 0}`,
       `👥 Майстри: ${stats?.masters_total || 0}`,
       `🟢 Активні: ${stats?.masters_active || 0}`,
-      "",
-      "Команди:",
-      "/requests — заявки",
-      "/masters — майстри",
     ].join("\n"),
     []
   );
