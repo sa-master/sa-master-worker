@@ -1,96 +1,292 @@
-SA-MASTER — PATCH: admin-only permanent master deletion
-============================================================
+import { json, error } from "../lib/json.js";
+import {
+  STATUS_LABELS,
+  statusLabel,
+  isValidStatus,
+  withStatusLabel,
+} from "../lib/statuses.js";
+import { normalizePhone, isValidPhone } from "../lib/phone.js";
+import { str } from "../lib/validate.js";
+import {
+  sendTelegram,
+  sendMessageWithButtons,
+  editMessageText,
+  answerCallbackQuery,
+} from "../lib/telegram.js";
+import {
+  buildStatusButtons,
+  canChangeStatus,
+  formatRequestText,
+} from "../lib/telegram-buttons.js";
+import {
+  banMasterFromJobsGroup,
+  unbanMasterFromJobsGroup,
+  getJobsChatMember,
+  sendToMaster,
+} from "../lib/telegram-jobs.js";
+import { publishRequestToJobsGroup } from "./jobs.js";
 
-ФАЙЛ: handlers/requests.js
+const CURRENT_YEAR = 2026;
+const ESTIMATE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const UPLOAD_LINK_TTL_MS = 2 * 60 * 60 * 1000;
 
-ВАЖЛИВО
--------
-Це патч до актуального handlers/requests.js, який ви надіслали.
-Він:
-- додає адмінське видалення майстра;
-- робить ОДНЕ підтвердження;
-- прибирає кнопку "🔄 Оновити";
-- не дозволяє майстру самому стерти історію;
-- не видаляє клієнтські заявки;
-- очищає відомі з поточного коду зв'язки майстра.
+/* =========================================================
+ * ADMIN: майстри
+ * ========================================================= */
 
+function adminMasterStatusLabel(status) {
+  if (status === "active") return "🟢 Активний";
+  if (status === "blocked") return "🔴 Заблокований";
+  if (status === "inactive") return "⚪ Неактивний";
+  return `⚪ ${status || "невідомо"}`;
+}
 
-1. У showMasterCard(...) ЗАМІНІТЬ нижній блок кнопок
-====================================================
+async function getAdminMaster(env, masterId) {
+  return env.DB.prepare(`
+    SELECT
+      id, telegram_id, username, first_name, phone,
+      specializations, cities, status, referral_token,
+      application_id, joined_at,
+      good_deals_count, no_answer_count, weird_client_count
+    FROM masters
+    WHERE id = ?
+    LIMIT 1
+  `).bind(masterId).first();
+}
 
-ЗНАЙДІТЬ блок, де додаються кнопки "🔄 Оновити" та "👥 До списку",
-і замініть його на:
+async function sendMastersMenu(env) {
+  const rows = await env.DB.prepare(`
+    SELECT id, first_name, username, specializations, cities, status
+    FROM masters
+    ORDER BY
+      CASE status
+        WHEN 'active' THEN 1
+        WHEN 'blocked' THEN 2
+        WHEN 'inactive' THEN 3
+        ELSE 4
+      END,
+      id DESC
+    LIMIT 100
+  `).all();
 
-buttons.push([
-  {
-    text: "🗑 Видалити назавжди",
-    callback_data: `master_delete_ask:${master.id}`,
-  },
-]);
+  const masters = rows.results || [];
 
-buttons.push([
-  {
-    text: "👥 До списку",
-    callback_data: "masters_list",
-  },
-]);
+  if (!masters.length) {
+    return sendMessageWithButtons(
+      env,
+      ["👥 МАЙСТРИ", "", "У базі поки немає зареєстрованих майстрів."].join("\n"),
+      []
+    );
+  }
 
+  const buttons = masters.map((m) => [{
+    text: `${m.status === "active" ? "🟢" : m.status === "blocked" ? "🔴" : "⚪"} ${m.first_name || m.username || `Майстер #${m.id}`}`,
+    callback_data: `master_open:${m.id}`,
+  }]);
 
-2. ДОДАЙТЕ функцію перед handleTelegramWebhook(...)
-==================================================
+  return sendMessageWithButtons(
+    env,
+    [
+      "👥 МАЙСТРИ SA-MASTER Jobs",
+      "",
+      `Всього: ${masters.length}`,
+      "",
+      "Оберіть майстра:",
+    ].join("\n"),
+    buttons
+  );
+}
+
+async function showMasterCard(env, callbackId, masterId) {
+  const master = await getAdminMaster(env, masterId);
+
+  if (!master) {
+    await answerCallbackQuery(env, callbackId, "❌ Майстра не знайдено", true);
+    return;
+  }
+
+  let tgStatus = "—";
+  try {
+    const member = await getJobsChatMember(env, master.telegram_id);
+    tgStatus = member?.ok
+      ? (member.result?.status || "—")
+      : `помилка: ${member?.description || "невідомо"}`;
+  } catch {
+    tgStatus = "помилка перевірки";
+  }
+
+  const text = [
+    "👤 МАЙСТЕР SA-MASTER Jobs",
+    "",
+    `Ім'я: ${master.first_name || "—"}`,
+    `Username: ${master.username ? `@${master.username}` : "—"}`,
+    `📞 ${master.phone || "—"}`,
+    `🛠 ${master.specializations || "—"}`,
+    `🏙 ${master.cities || "—"}`,
+    `🆔 Telegram: ${master.telegram_id}`,
+    `📊 Статус: ${adminMasterStatusLabel(master.status)}`,
+    `👥 Telegram-група: ${tgStatus}`,
+    "",
+    `✅ Успішні заявки: ${master.good_deals_count || 0}`,
+    `📵 Не відповіли: ${master.no_answer_count || 0}`,
+    `⚠️ Дивні клієнти: ${master.weird_client_count || 0}`,
+  ].join("\n");
+
+  const buttons = [];
+
+  if (master.status === "active") {
+    buttons.push([
+      { text: "🚫 Заблокувати", callback_data: `master_block:${master.id}` },
+    ]);
+  } else if (master.status === "blocked") {
+    buttons.push([
+      { text: "✅ Розблокувати", callback_data: `master_unblock:${master.id}` },
+    ]);
+  }
+
+  buttons.push([
+    { text: "🗑 Видалити назавжди", callback_data: `master_delete_ask:${master.id}` },
+  ]);
+
+  buttons.push([
+    { text: "👥 До списку", callback_data: "masters_list" },
+  ]);
+
+  await sendMessageWithButtons(env, text, buttons);
+  await answerCallbackQuery(env, callbackId, "");
+}
+
+async function blockMaster(env, callbackId, masterId) {
+  const master = await getAdminMaster(env, masterId);
+
+  if (!master) {
+    await answerCallbackQuery(env, callbackId, "❌ Майстра не знайдено", true);
+    return;
+  }
+
+  if (master.status === "blocked") {
+    await answerCallbackQuery(env, callbackId, "⚠️ Майстер уже заблокований", true);
+    return;
+  }
+
+  const ban = await banMasterFromJobsGroup(env, master.telegram_id);
+
+  if (!ban?.ok) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      `❌ Telegram: ${ban?.description || "не вдалося заблокувати"}`,
+      true
+    );
+    return;
+  }
+
+  try {
+    await env.DB.prepare(`
+      UPDATE masters
+      SET status = 'blocked', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(master.id).run();
+  } catch (err) {
+    console.error("DB block master failed:", err);
+    await unbanMasterFromJobsGroup(env, master.telegram_id);
+    await answerCallbackQuery(env, callbackId, "❌ Не вдалося зберегти блокування в D1", true);
+    return;
+  }
+
+  await answerCallbackQuery(env, callbackId, "🚫 Майстра заблоковано", true);
+
+  try {
+    await sendToMaster(
+      env,
+      master.telegram_id,
+      [
+        "🚫 ДОСТУП ДО SA-MASTER Jobs ЗАБЛОКОВАНО",
+        "",
+        "Ваш профіль заблоковано адміністратором.",
+        "Доступ до групи заявок та отримання заявок вимкнено.",
+        "",
+        "Для відновлення доступу зверніться до адміністратора.",
+      ].join("\n")
+    );
+  } catch (err) {
+    console.error("Blocked master notification failed:", err);
+  }
+}
+
+async function unblockMaster(env, callbackId, masterId) {
+  const master = await getAdminMaster(env, masterId);
+
+  if (!master) {
+    await answerCallbackQuery(env, callbackId, "❌ Майстра не знайдено", true);
+    return;
+  }
+
+  const unban = await unbanMasterFromJobsGroup(env, master.telegram_id);
+
+  if (!unban?.ok) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      `❌ Telegram: ${unban?.description || "не вдалося розблокувати"}`,
+      true
+    );
+    return;
+  }
+
+  try {
+    await env.DB.prepare(`
+      UPDATE masters
+      SET status = 'active', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(master.id).run();
+  } catch (err) {
+    console.error("DB unblock master failed:", err);
+    await answerCallbackQuery(env, callbackId, "❌ Не вдалося змінити статус у D1", true);
+    return;
+  }
+
+  await answerCallbackQuery(
+    env,
+    callbackId,
+    "✅ Майстра розблоковано. Він може отримати нове запрошення.",
+    true
+  );
+
+  try {
+    await sendToMaster(
+      env,
+      master.telegram_id,
+      [
+        "✅ ДОСТУП ДО SA-MASTER Jobs ВІДНОВЛЕНО",
+        "",
+        "Ваш профіль знову активний.",
+        "Відкрийте бота /start та отримайте нове запрошення до групи заявок.",
+      ].join("\n")
+    );
+  } catch (err) {
+    console.error("Unblocked master notification failed:", err);
+  }
+}
 
 async function deleteMasterPermanently(env, callbackId, masterId) {
   const master = await getAdminMaster(env, masterId);
 
   if (!master) {
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      "❌ Майстра не знайдено",
-      true
-    );
+    await answerCallbackQuery(env, callbackId, "❌ Майстра не знайдено", true);
     return false;
   }
 
-  /*
-   * Закриваємо доступ до Telegram-групи.
-   * Невдала Telegram-операція не блокує видалення з D1:
-   * майстер міг уже сам вийти з групи.
-   */
   try {
-    const ban = await banMasterFromJobsGroup(
-      env,
-      master.telegram_id
-    );
-
+    const ban = await banMasterFromJobsGroup(env, master.telegram_id);
     if (!ban?.ok) {
-      console.error(
-        "Telegram cleanup before master delete failed:",
-        ban?.description || ban
-      );
+      console.error("Telegram cleanup before master delete failed:", ban?.description || ban);
     }
   } catch (err) {
-    console.error(
-      "Telegram cleanup before master delete failed:",
-      err
-    );
+    console.error("Telegram cleanup before master delete failed:", err);
   }
 
   try {
-    /*
-     * Відомі з поточного коду зв'язки:
-     *
-     * requests.source_master_id -> masters.id
-     * requests.assigned_master_id -> Telegram ID майстра
-     * events.author_id -> masters.id для author_type='master'
-     * request_outcomes.master_id -> Telegram ID майстра
-     * master_request_drafts.telegram_id -> Telegram ID майстра
-     * master_applications.telegram_id -> Telegram ID майстра
-     *
-     * Самі requests та events НЕ видаляємо.
-     * Історія клієнтських заявок залишається.
-     */
-
     await env.DB.batch([
       env.DB.prepare(`
         DELETE FROM request_outcomes
@@ -139,27 +335,12 @@ async function deleteMasterPermanently(env, callbackId, masterId) {
       `).bind(master.id),
     ]);
   } catch (err) {
-    console.error(
-      "Permanent master delete failed:",
-      err
-    );
-
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      "❌ Не вдалося видалити майстра з бази",
-      true
-    );
-
+    console.error("Permanent master delete failed:", err);
+    await answerCallbackQuery(env, callbackId, "❌ Не вдалося видалити майстра з бази", true);
     return false;
   }
 
-  await answerCallbackQuery(
-    env,
-    callbackId,
-    "🗑 Майстра видалено назавжди",
-    true
-  );
+  await answerCallbackQuery(env, callbackId, "🗑 Майстра видалено назавжди", true);
 
   await sendMessageWithButtons(
     env,
@@ -170,182 +351,940 @@ async function deleteMasterPermanently(env, callbackId, masterId) {
       "",
       "Клієнтські заявки та їх історія залишилися в системі без прив'язки до видаленого профілю.",
     ].join("\n"),
-    [
-      [
-        {
-          text: "👥 До списку майстрів",
-          callback_data: "masters_list",
-        },
-      ],
-    ]
+    [[{ text: "👥 До списку майстрів", callback_data: "masters_list" }]]
   );
 
   return true;
 }
 
+/* =========================================================
+ * Посилання на калькулятор
+ * ========================================================= */
 
-3. У handleTelegramWebhook(...) ДОДАЙТЕ ДВА callback
-====================================================
+function calculatorUrl(requestCode, token, workerOrigin, env) {
+  if (!token || !env.CALCULATOR_URL) return "";
 
-Додайте їх у блок ADMIN callback-ів, ПЕРЕД старими callback заявок.
+  const url = new URL(env.CALCULATOR_URL);
+  url.searchParams.set("request", requestCode);
+  url.searchParams.set("token", token);
+  url.searchParams.set("api", workerOrigin);
+  return url.toString();
+}
 
+/* =========================================================
+ * POST / — створення заявки
+ * ========================================================= */
 
-/* ADMIN: запит підтвердження повного видалення */
-if (data.startsWith("master_delete_ask:")) {
-  const masterId = Number(data.slice(18));
+export async function handleCreateRequest(request, env, headers) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return error("Некоректний JSON", headers, 400);
+  }
 
-  const master = await getAdminMaster(
-    env,
-    masterId
+  const name = str(body.name, { max: 120, required: true });
+  const phone = str(body.phone, { max: 40, required: true });
+  const type = str(body.type, { max: 40, required: true });
+
+  if (!name || !phone || !type) {
+    return error("Необхідні ім'я, телефон та тип заявки", headers, 400);
+  }
+
+  if (!isValidPhone(phone)) {
+    return error("Некоректний номер телефону", headers, 400);
+  }
+
+  const normalizedPhone = normalizePhone(phone);
+  const typeLabel = str(body.typeLabel, { max: 80 }) || type;
+  const location = str(body.location, { max: 300 });
+  const timing = str(body.timing, { max: 100 });
+  const project = str(body.project, { max: 200 });
+  const consultation = str(body.consultationDate, { max: 100 });
+  const source = str(body.source, { max: 80 }) || "SA-MASTER.PRO";
+  const notes = str(body.notes, { max: 500 });
+  const referralToken = str(body.ref, { max: 100 });
+
+  let sourceType = "client";
+  let sourceMasterId = null;
+  let sourceMaster = null;
+
+  if (referralToken) {
+    try {
+      sourceMaster = await env.DB.prepare(`
+        SELECT id, telegram_id, username, first_name, status
+        FROM masters
+        WHERE referral_token = ?
+          AND status = 'active'
+        LIMIT 1
+      `).bind(referralToken).first();
+
+      if (sourceMaster) {
+        sourceType = "master";
+        sourceMasterId = sourceMaster.id;
+      }
+    } catch (err) {
+      console.error("Referral lookup failed:", err);
+    }
+  }
+
+  const estimateToken = crypto.randomUUID().replaceAll("-", "");
+  const estimateTokenExpiresAt = new Date(Date.now() + ESTIMATE_LINK_TTL_MS).toISOString();
+  const uploadToken = crypto.randomUUID().replaceAll("-", "");
+  const uploadTokenExpiresAt = new Date(Date.now() + UPLOAD_LINK_TTL_MS).toISOString();
+
+  let requestId;
+  let requestCode;
+  let clientId = null;
+
+  try {
+    const seq = await env.DB.prepare(`
+      UPDATE sequences
+      SET value = value + 1
+      WHERE name = ?
+      RETURNING value
+    `).bind(`request_${CURRENT_YEAR}`).first();
+
+    if (!seq || typeof seq.value !== "number") {
+      return error("Не вдалося згенерувати код заявки", headers, 500);
+    }
+
+    requestCode = `SM-R-${CURRENT_YEAR}-${String(seq.value).padStart(3, "0")}`;
+
+    const existingClient = await env.DB.prepare(`
+      SELECT id FROM clients WHERE phone = ? LIMIT 1
+    `).bind(normalizedPhone).first();
+
+    if (existingClient) {
+      clientId = existingClient.id;
+    } else {
+      const ins = await env.DB.prepare(`
+        INSERT INTO clients (name, phone) VALUES (?, ?)
+      `).bind(name, normalizedPhone).run();
+
+      clientId = ins.meta?.last_row_id || null;
+    }
+
+    const insertResult = await env.DB.prepare(`
+      INSERT INTO requests (
+        request_code, type, type_label, name, phone, location,
+        timing, project, consultation_date, source,
+        source_type, source_master_id, status, client_id, notes,
+        estimate_token, estimate_token_expires_at,
+        upload_token, upload_token_expires_at
+      )
+      VALUES (
+        ?, ?, ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?,
+        'new',
+        ?, ?,
+        ?, ?,
+        ?, ?
+      )
+    `).bind(
+      requestCode,
+      type,
+      typeLabel,
+      name,
+      normalizedPhone,
+      location || null,
+      timing || null,
+      project || null,
+      consultation || null,
+      source,
+      sourceType,
+      sourceMasterId,
+      clientId,
+      notes || null,
+      estimateToken,
+      estimateTokenExpiresAt,
+      uploadToken,
+      uploadTokenExpiresAt
+    ).run();
+
+    if (!insertResult.meta?.last_row_id) {
+      return error("Не вдалося створити заявку", headers, 500);
+    }
+
+    requestId = insertResult.meta.last_row_id;
+
+    await env.DB.prepare(`
+      INSERT INTO events (
+        object_id, request_id, event_type, content, author_type
+      )
+      VALUES (NULL, ?, 'request_created', 'Створено заявку', 'system')
+    `).bind(requestId).run();
+
+    if (sourceMasterId) {
+      await env.DB.prepare(`
+        INSERT INTO events (
+          object_id, request_id, event_type, content, author_type, author_id
+        )
+        VALUES (
+          NULL, ?, 'request_referred',
+          'Заявку передано майстром', 'master', ?
+        )
+      `).bind(requestId, String(sourceMasterId)).run();
+    }
+  } catch (err) {
+    console.error("Create request failed:", err);
+
+    if (String(err?.message || "").includes("UNIQUE")) {
+      return error("Конфлікт даних клієнта. Спробуйте ще раз.", headers, 409);
+    }
+
+    return error("Помилка створення заявки", headers, 500);
+  }
+
+  const referralLabel = sourceMasterId
+    ? (sourceMaster?.username
+        ? `@${sourceMaster.username}`
+        : sourceMaster?.first_name || `ID ${sourceMasterId}`)
+    : null;
+
+  const text = [
+    "🏠 НОВА ЗАЯВКА",
+    `🆔 ${requestCode}`,
+    `👤 Ім'я: ${name}`,
+    `📞 Телефон: ${normalizedPhone}`,
+    `🔧 Тип: ${typeLabel}`,
+    `📍 Об'єкт: ${location || "—"}`,
+    `📐 Дизайн-проєкт: ${project || "—"}`,
+    `🗓 Початок: ${timing || "—"}`,
+    `📅 Консультація: ${consultation || "—"}`,
+    sourceMasterId
+      ? `🤝 Передав майстер: ${referralLabel}`
+      : `🔗 Джерело: ${source}`,
+    `📊 Статус: ${statusLabel("new")}`,
+    `🕐 Час: ${new Date().toLocaleString("uk-UA", { timeZone: "Europe/Kyiv" })}`,
+    notes ? `📝 Опис: ${notes}` : null,
+  ].filter(Boolean).join("\n");
+
+  const buttons = buildStatusButtons(
+    requestCode,
+    "new",
+    calculatorUrl(requestCode, estimateToken, new URL(request.url).origin, env)
   );
 
-  if (!master) {
-    await answerCallbackQuery(
+  buttons.push([{
+    text: "🤝 Передати в канал",
+    callback_data: `transfer_to_jobs:${requestCode}`,
+  }]);
+
+  const tg = await sendMessageWithButtons(env, text, buttons);
+
+  if (!tg.ok) {
+    console.error("Telegram send failed:", tg.description || tg);
+  }
+
+  return json({
+    ok: true,
+    request: {
+      id: requestId,
+      request_code: requestCode,
+      client_id: clientId,
+      status: "new",
+      status_label: statusLabel("new"),
+      upload_token: uploadToken,
+    },
+  }, headers);
+}
+
+export async function handleGetCalculatorRequest(request, env, headers, params, url) {
+  const [requestCode] = params;
+  const token = str(url.searchParams.get("token"), { max: 100, required: true });
+
+  if (!token) return error("Відсутній ключ заявки", headers, 403);
+
+  const row = await env.DB.prepare(`
+    SELECT
+      request_code, name, phone, location, type, type_label,
+      timing, project, consultation_date, notes
+    FROM requests
+    WHERE request_code = ?
+      AND estimate_token = ?
+      AND datetime(estimate_token_expires_at) > CURRENT_TIMESTAMP
+    LIMIT 1
+  `).bind(requestCode, token).first();
+
+  if (!row) {
+    return error("Посилання на заявку недійсне або вже прострочене", headers, 404);
+  }
+
+  return json({ ok: true, request: row }, headers);
+}
+
+export async function handleListRequests(request, env, headers, _params, url) {
+  const limit = Math.min(Number(url.searchParams.get("limit")) || 50, 200);
+  const offset = Math.max(Number(url.searchParams.get("offset")) || 0, 0);
+
+  const result = await env.DB.prepare(`
+    SELECT
+      r.*,
+      c.id AS client_id,
+      c.name AS client_name,
+      c.phone AS client_phone
+    FROM requests r
+    LEFT JOIN clients c ON c.id = r.client_id
+    ORDER BY r.id DESC
+    LIMIT ?
+    OFFSET ?
+  `).bind(limit, offset).all();
+
+  return json({
+    ok: true,
+    requests: (result.results || []).map(withStatusLabel),
+    limit,
+    offset,
+  }, headers);
+}
+
+export async function handleGetRequest(request, env, headers, params) {
+  const [requestCode] = params;
+
+  const row = await env.DB.prepare(`
+    SELECT
+      r.*,
+      c.name AS client_name,
+      c.phone AS client_phone,
+      o.object_code,
+      o.name AS object_name,
+      o.address AS object_address,
+      o.status AS object_status
+    FROM requests r
+    LEFT JOIN clients c ON c.id = r.client_id
+    LEFT JOIN objects o ON o.id = r.object_id
+    WHERE r.request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!row) return error("Заявку не знайдено", headers, 404);
+
+  return json({
+    ok: true,
+    request: {
+      ...row,
+      status_label: statusLabel(row.status),
+      object_status_label: row.object_status ? statusLabel(row.object_status) : null,
+    },
+  }, headers);
+}
+
+export async function handleUpdateStatus(request, env, headers, params) {
+  const [requestCode] = params;
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return error("Некоректний JSON", headers, 400);
+  }
+
+  const newStatus = String(body.status || "").trim();
+
+  if (!isValidStatus(newStatus)) {
+    return error("Невідомий статус", headers, 400, {
+      allowed_statuses: Object.keys(STATUS_LABELS),
+    });
+  }
+
+  const current = await env.DB.prepare(`
+    SELECT id, request_code, status, object_id
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!current) return error("Заявку не знайдено", headers, 404);
+
+  const oldStatus = current.status;
+
+  if (oldStatus === newStatus) {
+    return json({ ok: true, unchanged: true, status: newStatus }, headers);
+  }
+
+  const oldLabel = statusLabel(oldStatus);
+  const newLabel = statusLabel(newStatus);
+  const eventContent = `${oldLabel} → ${newLabel}`;
+
+  const statements = [
+    env.DB.prepare(`
+      UPDATE requests
+      SET status = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(newStatus, current.id),
+
+    env.DB.prepare(`
+      INSERT INTO events (
+        object_id, request_id, event_type, content, author_type
+      )
+      VALUES (?, ?, 'status_changed', ?, 'system')
+    `).bind(current.object_id || null, current.id, eventContent),
+  ];
+
+  const syncObject = current.object_id && newStatus !== "cancelled";
+
+  if (syncObject) {
+    statements.push(
+      env.DB.prepare(`
+        UPDATE objects
+        SET status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(newStatus, current.object_id),
+
+      env.DB.prepare(`
+        INSERT INTO events (
+          object_id, request_id, event_type, content, author_type
+        )
+        VALUES (?, ?, 'object_status_changed', ?, 'system')
+      `).bind(current.object_id, current.id, `Статус об'єкта → ${newLabel}`)
+    );
+  }
+
+  try {
+    await env.DB.batch(statements);
+  } catch (err) {
+    console.error("Status update batch failed:", err);
+    return error("Не вдалося оновити статус", headers, 500);
+  }
+
+  let object = null;
+
+  if (current.object_id) {
+    object = await env.DB.prepare(`
+      SELECT id, object_code, name, status
+      FROM objects
+      WHERE id = ?
+      LIMIT 1
+    `).bind(current.object_id).first();
+
+    if (object) {
+      object.status_label = statusLabel(object.status);
+      object.updated = syncObject;
+    }
+  }
+
+  return json({
+    ok: true,
+    request: {
+      id: current.id,
+      request_code: current.request_code,
+      old_status: oldStatus,
+      old_status_label: oldLabel,
+      status: newStatus,
+      status_label: newLabel,
+    },
+    object,
+    event: {
+      event_type: "status_changed",
+      content: eventContent,
+      author_type: "system",
+    },
+  }, headers);
+}
+
+export async function handleGetEvents(request, env, headers, params) {
+  const [requestCode] = params;
+
+  const current = await env.DB.prepare(`
+    SELECT id, request_code, status
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!current) return error("Заявку не знайдено", headers, 404);
+
+  const events = await env.DB.prepare(`
+    SELECT
+      id, request_id, object_id, event_type,
+      content, author_type, author_id, created_at
+    FROM events
+    WHERE request_id = ?
+    ORDER BY id ASC
+  `).bind(current.id).all();
+
+  return json({
+    ok: true,
+    request: {
+      id: current.id,
+      request_code: current.request_code,
+      status: current.status,
+      status_label: statusLabel(current.status),
+    },
+    events: events.results || [],
+  }, headers);
+}
+
+export async function handleAttachClient(request, env, headers, params) {
+  const [requestCode] = params;
+
+  const req = await env.DB.prepare(`
+    SELECT * FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!req) return error("Заявку не знайдено", headers, 404);
+
+  if (req.client_id) {
+    const client = await env.DB.prepare(`
+      SELECT id, name, phone
+      FROM clients
+      WHERE id = ?
+      LIMIT 1
+    `).bind(req.client_id).first();
+
+    return json({
+      ok: true,
+      created: false,
+      existing: true,
+      request: req,
+      client,
+    }, headers);
+  }
+
+  const normalizedPhone = normalizePhone(req.phone);
+
+  if (!normalizedPhone) {
+    return error("Некоректний телефон у заявці", headers, 400);
+  }
+
+  let client = await env.DB.prepare(`
+    SELECT id, name, phone
+    FROM clients
+    WHERE phone = ?
+    LIMIT 1
+  `).bind(normalizedPhone).first();
+
+  let created = false;
+
+  if (!client) {
+    const ins = await env.DB.prepare(`
+      INSERT INTO clients (name, phone)
+      VALUES (?, ?)
+    `).bind(req.name || "—", normalizedPhone).run();
+
+    if (!ins.meta?.last_row_id) {
+      return error("Не вдалося створити клієнта", headers, 500);
+    }
+
+    client = await env.DB.prepare(`
+      SELECT id, name, phone
+      FROM clients
+      WHERE id = ?
+      LIMIT 1
+    `).bind(ins.meta.last_row_id).first();
+
+    created = true;
+  }
+
+  await env.DB.prepare(`
+    UPDATE requests
+    SET client_id = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(client.id, req.id).run();
+
+  return json({
+    ok: true,
+    created,
+    existing: !created,
+    request: { ...req, client_id: client.id },
+    client,
+  }, headers);
+}
+
+/* =========================================================
+ * POST /telegram-webhook
+ * ========================================================= */
+
+export async function handleTelegramWebhook(request, env, headers) {
+  let update;
+
+  try {
+    update = await request.json();
+  } catch {
+    return json({ ok: false }, headers, 400);
+  }
+
+  if (update.message) {
+    const msg = update.message;
+
+    if (String(msg.from?.id) !== String(env.CHAT_ID)) {
+      return json({ ok: true }, headers);
+    }
+
+    const text = String(msg.text || "").trim();
+
+    if (text === "/start" || text === "/masters" || text === "👥 Майстри") {
+      await sendMessageWithButtons(
+        env,
+        [
+          "🛠 SA-MASTER",
+          "",
+          "Адміністрування заявок та майстрів.",
+          "",
+          "Оберіть розділ:",
+        ].join("\n"),
+        [[{
+          text: "👥 Майстри",
+          callback_data: "masters_list",
+        }]]
+      );
+
+      return json({ ok: true }, headers);
+    }
+
+    return json({ ok: true }, headers);
+  }
+
+  if (!update.callback_query) {
+    return json({ ok: true }, headers);
+  }
+
+  const cq = update.callback_query;
+
+  if (String(cq.from?.id) !== String(env.CHAT_ID)) {
+    await answerCallbackQuery(env, cq.id, "❌ Немає доступу", true);
+    return json({ ok: true }, headers);
+  }
+
+  const data = String(cq.data || "");
+  const chatId = cq.message?.chat?.id;
+  const messageId = cq.message?.message_id;
+  const workerOrigin = new URL(request.url).origin;
+
+  if (data === "masters_list") {
+    await answerCallbackQuery(env, cq.id, "");
+    await sendMastersMenu(env);
+    return json({ ok: true }, headers);
+  }
+
+  if (data.startsWith("master_open:")) {
+    await showMasterCard(env, cq.id, Number(data.slice(12)));
+    return json({ ok: true }, headers);
+  }
+
+  if (data.startsWith("master_block:")) {
+    const masterId = Number(data.slice(13));
+    await blockMaster(env, cq.id, masterId);
+    await showMasterCard(env, cq.id, masterId);
+    return json({ ok: true }, headers);
+  }
+
+  if (data.startsWith("master_unblock:")) {
+    const masterId = Number(data.slice(15));
+    await unblockMaster(env, cq.id, masterId);
+    await showMasterCard(env, cq.id, masterId);
+    return json({ ok: true }, headers);
+  }
+
+  if (data.startsWith("master_delete_ask:")) {
+    const masterId = Number(data.slice(18));
+    const master = await getAdminMaster(env, masterId);
+
+    if (!master) {
+      await answerCallbackQuery(env, cq.id, "❌ Майстра не знайдено", true);
+      return json({ ok: true }, headers);
+    }
+
+    await answerCallbackQuery(env, cq.id, "");
+
+    const masterLabel = master.username
+      ? `@${master.username}`
+      : master.first_name || `Майстер #${master.id}`;
+
+    await sendMessageWithButtons(
       env,
-      cq.id,
-      "❌ Майстра не знайдено",
-      true
+      [
+        "⚠️ ВИДАЛИТИ МАЙСТРА НАЗАВЖДИ?",
+        "",
+        `👤 ${masterLabel}`,
+        `📞 ${master.phone || "—"}`,
+        "",
+        "Буде видалено профіль, анкету, статистику та відомі персональні дані майстра.",
+        "",
+        "Клієнтські заявки та їх історія залишаться, але прив'язка до цього майстра буде очищена.",
+        "",
+        "Цю дію неможливо скасувати.",
+      ].join("\n"),
+      [[
+        { text: "🗑 Видалити", callback_data: `master_delete_confirm:${master.id}` },
+        { text: "Скасувати", callback_data: `master_open:${master.id}` },
+      ]]
     );
 
     return json({ ok: true }, headers);
   }
 
-  await answerCallbackQuery(
-    env,
-    cq.id,
-    ""
-  );
+  if (data.startsWith("master_delete_confirm:")) {
+    const masterId = Number(data.slice(22));
+    await deleteMasterPermanently(env, cq.id, masterId);
+    return json({ ok: true }, headers);
+  }
 
-  const masterLabel =
-    master.username
-      ? `@${master.username}`
-      : master.first_name ||
-        `Майстер #${master.id}`;
+  if (data.startsWith("details:")) {
+    return handleTelegramDetails(env, headers, data.slice(8), cq.id, chatId);
+  }
 
-  await sendMessageWithButtons(
-    env,
-    [
-      "⚠️ ВИДАЛИТИ МАЙСТРА НАЗАВЖДИ?",
-      "",
-      `👤 ${masterLabel}`,
-      `📞 ${master.phone || "—"}`,
-      "",
-      "Буде видалено профіль, анкету, статистику та відомі персональні дані майстра.",
-      "",
-      "Клієнтські заявки та їх історія залишаться, але прив'язка до цього майстра буде очищена.",
-      "",
-      "Цю дію неможливо скасувати.",
-    ].join("\n"),
-    [
-      [
-        {
-          text: "🗑 Видалити",
-          callback_data: `master_delete_confirm:${master.id}`,
-        },
-        {
-          text: "Скасувати",
-          callback_data: `master_open:${master.id}`,
-        },
-      ],
-    ]
-  );
+  if (data.startsWith("status:")) {
+    const [, requestCode, newStatus] = data.split(":");
+
+    return handleTelegramStatusUpdate(
+      env,
+      headers,
+      requestCode,
+      newStatus,
+      cq.id,
+      chatId,
+      messageId,
+      workerOrigin
+    );
+  }
+
+  if (data.startsWith("transfer_to_jobs:")) {
+    return handleTransferToJobs(
+      env,
+      headers,
+      data.slice(17),
+      cq,
+      chatId,
+      messageId,
+      workerOrigin
+    );
+  }
+
+  if (data.startsWith("app_approve:")) {
+    const { handleApplicationReview } = await import("./join.js");
+
+    return handleApplicationReview(
+      env,
+      headers,
+      Number(data.slice(12)),
+      "approve",
+      cq
+    );
+  }
+
+  if (data.startsWith("app_reject:")) {
+    const { handleApplicationReview } = await import("./join.js");
+
+    return handleApplicationReview(
+      env,
+      headers,
+      Number(data.slice(11)),
+      "reject",
+      cq
+    );
+  }
+
+  await answerCallbackQuery(env, cq.id, "❓ Невідома дія", true);
+  return json({ ok: true }, headers);
+}
+
+async function handleTelegramDetails(env, headers, requestCode, callbackId, chatId) {
+  const req = await env.DB.prepare(`
+    SELECT * FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!req) {
+    await answerCallbackQuery(env, callbackId, "❌ Заявку не знайдено", true);
+    return json({ ok: true }, headers);
+  }
+
+  const events = await env.DB.prepare(`
+    SELECT event_type, content, created_at
+    FROM events
+    WHERE request_id = ?
+    ORDER BY id ASC
+  `).bind(req.id).all();
+
+  const lines = [
+    formatRequestText(req),
+    "",
+    `🕐 Створено: ${req.created_at || "—"}`,
+    `🕐 Оновлено: ${req.updated_at || "—"}`,
+  ];
+
+  if (events.results?.length) {
+    lines.push("", "📜 Історія:");
+
+    for (const ev of events.results.slice(-10)) {
+      lines.push(`• ${ev.content}`);
+    }
+  }
+
+  await sendTelegram(env, lines.join("\n"));
+  await answerCallbackQuery(env, callbackId, "");
 
   return json({ ok: true }, headers);
 }
 
+async function handleTelegramStatusUpdate(
+  env,
+  headers,
+  requestCode,
+  newStatus,
+  callbackId,
+  chatId,
+  messageId,
+  workerOrigin
+) {
+  if (!isValidStatus(newStatus)) {
+    await answerCallbackQuery(env, callbackId, "❌ Невідомий статус", true);
+    return json({ ok: true }, headers);
+  }
 
-/* ADMIN: остаточне видалення після одного підтвердження */
-if (data.startsWith("master_delete_confirm:")) {
-  const masterId = Number(data.slice(22));
+  const current = await env.DB.prepare(`
+    SELECT id, request_code, status, object_id, name, phone
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
 
-  await deleteMasterPermanently(
-    env,
-    cq.id,
-    masterId
+  if (!current) {
+    await answerCallbackQuery(env, callbackId, "❌ Заявку не знайдено", true);
+    return json({ ok: true }, headers);
+  }
+
+  if (!canChangeStatus(current.status, newStatus)) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      `❌ Неможливо: статус «${statusLabel(current.status)}» → «${statusLabel(newStatus)}»`,
+      true
+    );
+    return json({ ok: true }, headers);
+  }
+
+  const oldLabel = statusLabel(current.status);
+  const newLabel = statusLabel(newStatus);
+  const eventContent = `${oldLabel} → ${newLabel}`;
+
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE requests
+        SET status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(newStatus, current.id),
+
+      env.DB.prepare(`
+        INSERT INTO events (
+          object_id, request_id, event_type, content, author_type
+        )
+        VALUES (?, ?, 'status_changed', ?, 'system')
+      `).bind(current.object_id || null, current.id, eventContent),
+    ]);
+  } catch (err) {
+    console.error("Telegram status update failed:", err);
+    await answerCallbackQuery(env, callbackId, "❌ Помилка збереження", true);
+    return json({ ok: true }, headers);
+  }
+
+  const req = await env.DB.prepare(`
+    SELECT * FROM requests
+    WHERE id = ?
+    LIMIT 1
+  `).bind(current.id).first();
+
+  const text = [
+    `🏠 ЗАЯВКА ${req.request_code}`,
+    `👤 ${req.name}`,
+    `📞 ${req.phone}`,
+    `📊 Статус: ${newLabel}`,
+    `🕐 Оновлено: ${new Date().toLocaleString("uk-UA", { timeZone: "Europe/Kyiv" })}`,
+  ].join("\n");
+
+  const buttons = buildStatusButtons(
+    req.request_code,
+    newStatus,
+    calculatorUrl(req.request_code, req.estimate_token, workerOrigin, env)
   );
+
+  await editMessageText(env, chatId, messageId, text, buttons);
+  await answerCallbackQuery(env, callbackId, `✅ ${newLabel}`);
 
   return json({ ok: true }, headers);
 }
 
+async function handleTransferToJobs(
+  env,
+  headers,
+  requestCode,
+  cq,
+  chatId,
+  messageId,
+  workerOrigin
+) {
+  const req = await env.DB.prepare(`
+    SELECT * FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
 
-4. ВАЖЛИВО: САМОВИДАЛЕННЯ У jobs.js
-===================================
+  if (!req) {
+    await answerCallbackQuery(env, cq.id, "❌ Заявку не знайдено", true);
+    return json({ ok: true }, headers);
+  }
 
-У handlers/jobs.js НЕ повинні залишатися callback-и:
+  if (req.transferred_to_jobs) {
+    await answerCallbackQuery(env, cq.id, "⚠️ Уже передано в канал", true);
+    return json({ ok: true }, headers);
+  }
 
-delete_profile_ask
-delete_profile_cancel
-delete_profile_confirm
+  const result = await publishRequestToJobsGroup(env, req);
 
-і кнопка:
+  if (!result.ok) {
+    console.error("Publish to jobs group failed:", result.description || result);
+    await answerCallbackQuery(env, cq.id, "❌ Не вдалося опублікувати", true);
+    return json({ ok: true }, headers);
+  }
 
-{
-  text: "🗑 Видалити профіль",
-  callback_data: "delete_profile_ask",
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE requests
+        SET
+          transferred_to_jobs = 1,
+          transferred_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(req.id),
+
+      env.DB.prepare(`
+        INSERT INTO events (
+          object_id, request_id, event_type, content, author_type
+        )
+        VALUES (
+          ?, ?, 'transferred_to_jobs',
+          'Передано в канал майстрів', 'system'
+        )
+      `).bind(req.object_id || null, req.id),
+    ]);
+  } catch (err) {
+    console.error("Mark as transferred failed:", err);
+  }
+
+  const updatedText = [
+    `🏠 ЗАЯВКА ${req.request_code}`,
+    `👤 ${req.name}`,
+    `📞 ${req.phone}`,
+    "📊 Статус: Передано в канал майстрів",
+    `🕐 ${new Date().toLocaleString("uk-UA", { timeZone: "Europe/Kyiv" })}`,
+  ].join("\n");
+
+  const buttons = buildStatusButtons(
+    req.request_code,
+    req.status,
+    calculatorUrl(req.request_code, req.estimate_token, workerOrigin, env)
+  );
+
+  await editMessageText(env, chatId, messageId, updatedText, buttons);
+  await answerCallbackQuery(env, cq.id, "✅ Передано в канал майстрів");
+
+  return json({ ok: true }, headers);
 }
-
-Майстер не повинен мати можливості стерти свої дані.
-
-Якщо він просто виходить із Telegram-групи:
-- профіль НЕ видаляється;
-- історія НЕ видаляється;
-- дані НЕ видаляються;
-- змінюється лише статус (у вашій поточній реалізації це "inactive";
-  якщо остаточно перейдете на "left", треба зробити це окремою узгодженою
-  зміною в jobs.js та адмін-логіці).
-
-
-5. РЕЗУЛЬТАТ У КАРТЦІ МАЙСТРА
-=============================
-
-Після цього кнопки внизу картки:
-
-для active:
-🚫 Заблокувати
-🗑 Видалити назавжди
-👥 До списку
-
-для blocked:
-✅ Розблокувати
-🗑 Видалити назавжди
-👥 До списку
-
-для inactive:
-🗑 Видалити назавжди
-👥 До списку
-
-Кнопки "🔄 Оновити" більше немає.
-
-
-6. ПЕРЕВІРКА ПІСЛЯ DEPLOY
-=========================
-
-1. Відкрити @sa_master_pro_bot.
-2. /start.
-3. 👥 Майстри.
-4. Відкрити тестового майстра.
-5. Перевірити, що "🔄 Оновити" відсутня.
-6. Натиснути "🗑 Видалити назавжди".
-7. Має з'явитися ОДНЕ підтвердження.
-8. Натиснути "🗑 Видалити".
-9. Майстер має зникнути зі списку.
-10. Його клієнтські заявки мають залишитися.
-11. Повторний /start у Jobs-боті для цього Telegram ID має трактувати
-    користувача як незареєстрованого (якщо немає іншої логіки/обмежень).
-
-
-ПРИМІТКА ПРО D1
-===============
-
-Цей патч очищає таблиці та поля, які вже видно у наданому коді:
-- masters
-- master_applications
-- master_request_drafts
-- request_outcomes
-- requests.source_master_id
-- requests.assigned_master_id
-- events.author_id
-
-Якщо у фактичній D1-схемі існують інші таблиці з FOREIGN KEY на masters.id
-або інші таблиці з персональними даними майстра, їх треба перевірити окремо
-перед тим, як вважати видалення абсолютно повним.
