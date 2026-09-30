@@ -232,7 +232,7 @@ async function sendRequestsMenu(env, chatId = null, messageId = null) {
         "У базі поки немає заявок.",
       ].join("\n"),
       [[
-        { text: "✖️ Закрити", callback_data: "admin_close" },
+        { text: "❌ Закрити", callback_data: "admin_close" },
       ]]
     );
   }
@@ -243,7 +243,7 @@ async function sendRequestsMenu(env, chatId = null, messageId = null) {
   }]);
 
   buttons.push([
-    { text: "✖️ Закрити", callback_data: "admin_close" },
+    { text: "❌ Закрити", callback_data: "admin_close" },
   ]);
 
   return render(
@@ -324,7 +324,7 @@ async function showRequestCard(
 
   buttons.push([
     { text: "📋 До заявок", callback_data: "requests_list" },
-    { text: "✖️ Закрити", callback_data: "admin_close" },
+    { text: "❌ Закрити", callback_data: "admin_close" },
   ]);
 
   await editMessageText(
@@ -405,7 +405,7 @@ async function sendMastersMenu(env, chatId = null, messageId = null) {
         "У базі поки немає зареєстрованих майстрів.",
       ].join("\n"),
       [[
-        { text: "✖️ Закрити", callback_data: "admin_close" },
+        { text: "❌ Закрити", callback_data: "admin_close" },
       ]]
     );
   }
@@ -424,7 +424,7 @@ async function sendMastersMenu(env, chatId = null, messageId = null) {
   }]);
 
   buttons.push([
-    { text: "✖️ Закрити", callback_data: "admin_close" },
+    { text: "❌ Закрити", callback_data: "admin_close" },
   ]);
 
   return render(
@@ -511,7 +511,7 @@ async function showMasterCard(
 
   buttons.push([
     { text: "👥 До списку", callback_data: "masters_list" },
-    { text: "✖️ Закрити", callback_data: "admin_close" },
+    { text: "❌ Закрити", callback_data: "admin_close" },
   ]);
 
   await editMessageText(
@@ -852,7 +852,7 @@ async function deleteMasterPermanently(
         callback_data: "masters_list",
       },
       {
-        text: "✖️ Закрити",
+        text: "❌ Закрити",
         callback_data: "admin_close",
       },
     ]]
@@ -2392,7 +2392,7 @@ async function handleTelegramDetails(
           `request_open:${requestCode}`,
       },
       {
-        text: "✖️ Закрити",
+        text: "❌ Закрити",
         callback_data: "admin_close",
       },
     ]]
@@ -2598,7 +2598,7 @@ async function handleTelegramStatusUpdate(
       callback_data: "requests_list",
     },
     {
-      text: "✖️ Закрити",
+      text: "❌ Закрити",
       callback_data: "admin_close",
     },
   ]);
@@ -2772,7 +2772,7 @@ async function handleTransferToJobs(
       callback_data: "requests_list",
     },
     {
-      text: "✖️ Закрити",
+      text: "❌ Закрити",
       callback_data: "admin_close",
     },
   ]);
