@@ -269,6 +269,11 @@ async function unblockMaster(env, callbackId, masterId) {
   }
 }
 
+/*
+ * Permanent delete is intentionally executed step-by-step rather than D1 batch.
+ * This gives us the exact failing SQL step in Cloudflare logs and avoids one
+ * bad optional cleanup statement hiding the real schema mismatch.
+ */
 async function deleteMasterPermanently(env, callbackId, masterId) {
   const master = await getAdminMaster(env, masterId);
 
@@ -279,26 +284,35 @@ async function deleteMasterPermanently(env, callbackId, masterId) {
 
   try {
     const ban = await banMasterFromJobsGroup(env, master.telegram_id);
+
     if (!ban?.ok) {
-      console.error("Telegram cleanup before master delete failed:", ban?.description || ban);
+      console.error(
+        "Telegram cleanup before master delete failed:",
+        ban?.description || ban
+      );
     }
   } catch (err) {
     console.error("Telegram cleanup before master delete failed:", err);
   }
 
-  try {
-    await env.DB.batch([
-      env.DB.prepare(`
+  const cleanupSteps = [
+    {
+      name: "request_outcomes",
+      statement: env.DB.prepare(`
         DELETE FROM request_outcomes
         WHERE master_id = ?
       `).bind(master.telegram_id),
-
-      env.DB.prepare(`
+    },
+    {
+      name: "master_request_drafts",
+      statement: env.DB.prepare(`
         DELETE FROM master_request_drafts
         WHERE telegram_id = ?
       `).bind(master.telegram_id),
-
-      env.DB.prepare(`
+    },
+    {
+      name: "requests.source_master_id",
+      statement: env.DB.prepare(`
         UPDATE requests
         SET
           source_master_id = NULL,
@@ -306,8 +320,10 @@ async function deleteMasterPermanently(env, callbackId, masterId) {
           updated_at = CURRENT_TIMESTAMP
         WHERE source_master_id = ?
       `).bind(master.id),
-
-      env.DB.prepare(`
+    },
+    {
+      name: "requests.assigned_master_id",
+      statement: env.DB.prepare(`
         UPDATE requests
         SET
           assigned_master_id = NULL,
@@ -316,31 +332,65 @@ async function deleteMasterPermanently(env, callbackId, masterId) {
           updated_at = CURRENT_TIMESTAMP
         WHERE assigned_master_id = ?
       `).bind(master.telegram_id),
-
-      env.DB.prepare(`
+    },
+    {
+      name: "events.author_id",
+      statement: env.DB.prepare(`
         UPDATE events
         SET author_id = NULL
         WHERE author_type = 'master'
           AND author_id = ?
       `).bind(String(master.id)),
-
-      env.DB.prepare(`
+    },
+    {
+      name: "master_applications",
+      statement: env.DB.prepare(`
         DELETE FROM master_applications
         WHERE telegram_id = ?
       `).bind(master.telegram_id),
-
-      env.DB.prepare(`
+    },
+    {
+      name: "masters",
+      statement: env.DB.prepare(`
         DELETE FROM masters
         WHERE id = ?
       `).bind(master.id),
-    ]);
-  } catch (err) {
-    console.error("Permanent master delete failed:", err);
-    await answerCallbackQuery(env, callbackId, "❌ Не вдалося видалити майстра з бази", true);
-    return false;
+    },
+  ];
+
+  for (const step of cleanupSteps) {
+    try {
+      console.log(`Permanent master delete: ${step.name}`);
+      await step.statement.run();
+    } catch (err) {
+      const message =
+        err?.message ||
+        err?.cause?.message ||
+        String(err);
+
+      console.error(
+        `Permanent master delete failed at step "${step.name}":`,
+        message,
+        err
+      );
+
+      await answerCallbackQuery(
+        env,
+        callbackId,
+        `❌ Помилка видалення: ${step.name}`,
+        true
+      );
+
+      return false;
+    }
   }
 
-  await answerCallbackQuery(env, callbackId, "🗑 Майстра видалено назавжди", true);
+  await answerCallbackQuery(
+    env,
+    callbackId,
+    "🗑 Майстра видалено назавжди",
+    true
+  );
 
   await sendMessageWithButtons(
     env,
@@ -351,7 +401,12 @@ async function deleteMasterPermanently(env, callbackId, masterId) {
       "",
       "Клієнтські заявки та їх історія залишилися в системі без прив'язки до видаленого профілю.",
     ].join("\n"),
-    [[{ text: "👥 До списку майстрів", callback_data: "masters_list" }]]
+    [[
+      {
+        text: "👥 До списку майстрів",
+        callback_data: "masters_list",
+      },
+    ]]
   );
 
   return true;
