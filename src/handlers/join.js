@@ -15,7 +15,7 @@ const MASTER_STATUS = {
 };
 
 /* =========================================================
- * MASTER HELPERS
+ * HELPERS
  * ========================================================= */
 
 async function getMasterByTelegramId(env, telegramId) {
@@ -53,7 +53,55 @@ async function getLatestApplication(env, telegramId) {
 }
 
 /* =========================================================
- * MASTER STATUS
+ * ГОЛОВНЕ МЕНЮ МАЙСТРА
+ * ========================================================= */
+
+function buildMasterMenuButtons() {
+  return [
+    [
+      {
+        text: "📋 Доступні заявки",
+        callback_data: "available_jobs",
+      },
+    ],
+    [
+      {
+        text: "➕ Передати заявку",
+        callback_data: "submit_request",
+      },
+    ],
+  ];
+}
+
+async function sendActiveMasterMenu(env, chatId, master) {
+  const name =
+    master?.first_name
+      ? `, ${master.first_name}`
+      : "";
+
+  await sendToMaster(
+    env,
+    chatId,
+    [
+      `👋 Вітаю${name}!`,
+      "",
+      "🔧 SA-MASTER Jobs",
+      "",
+      "Ваш профіль активний.",
+      "",
+      "📋 Переглядайте доступні заявки прямо в боті.",
+      "🤝 Беріть у роботу ті, які вам підходять.",
+      "🔒 Контакти замовника відкриваються після того, як ви берете заявку.",
+      "➕ Передавайте заявки, які не можете виконати самі.",
+      "",
+      "Оберіть дію:",
+    ].join("\n"),
+    buildMasterMenuButtons()
+  );
+}
+
+/* =========================================================
+ * СТАТУС МАЙСТРА
  * ========================================================= */
 
 async function sendMasterStatusMessage(
@@ -64,24 +112,10 @@ async function sendMasterStatusMessage(
   if (!master) return false;
 
   if (master.status === MASTER_STATUS.ACTIVE) {
-    await sendToMaster(
+    await sendActiveMasterMenu(
       env,
       chatId,
-      [
-        "✅ Ви вже зареєстровані як майстер.",
-        "",
-        "Ваш профіль SA-MASTER Jobs активний.",
-        "",
-        "Переглядайте доступні заявки прямо в боті.",
-      ].join("\n"),
-      [
-        [
-          {
-            text: "📋 Доступні заявки",
-            callback_data: "jobs_list",
-          },
-        ],
-      ]
+      master
     );
 
     return true;
@@ -96,7 +130,7 @@ async function sendMasterStatusMessage(
         "",
         "Ваші дані та історія в системі збережені.",
         "",
-        "Доступ до заявок наразі призупинено.",
+        "Для відновлення доступу зверніться до адміністратора.",
       ].join("\n")
     );
 
@@ -133,7 +167,7 @@ async function sendMasterStatusMessage(
 }
 
 /* =========================================================
- * START REGISTRATION
+ * ПОЧАТОК РЕЄСТРАЦІЇ
  * ========================================================= */
 
 export async function handleJoinStart(
@@ -142,10 +176,11 @@ export async function handleJoinStart(
   chatId,
   fromUser
 ) {
-  const master = await getMasterByTelegramId(
-    env,
-    fromUser.id
-  );
+  const master =
+    await getMasterByTelegramId(
+      env,
+      fromUser.id
+    );
 
   if (master) {
     await sendMasterStatusMessage(
@@ -173,7 +208,8 @@ export async function handleJoinStart(
       [
         "⏳ Ваша анкета вже на розгляді.",
         "",
-        "Після перевірки бот повідомить результат.",
+        "Зачекайте, будь ласка.",
+        "Після схвалення бот повідомить вас автоматично.",
       ].join("\n")
     );
 
@@ -217,7 +253,14 @@ export async function handleJoinStart(
       await sendToMaster(
         env,
         chatId,
-        "🛠 Напишіть вашу спеціалізацію: сантехніка, електрика або універсал"
+        [
+          "🛠 Яка ваша спеціалізація?",
+          "",
+          "Напишіть:",
+          "• сантехніка",
+          "• електрика",
+          "• універсал",
+        ].join("\n")
       );
     } else if (!existing.city) {
       await sendToMaster(
@@ -267,7 +310,18 @@ export async function handleJoinStart(
     [
       "👋 Вітаю!",
       "",
-      "Давайте заповнимо коротку анкету майстра.",
+      "🔧 SA-MASTER Jobs",
+      "",
+      "Для доступу до заявок потрібно пройти коротку реєстрацію.",
+      "",
+      "Після перевірки анкети ви зможете:",
+      "",
+      "📋 переглядати доступні заявки",
+      "🤝 брати заявки в роботу",
+      "📞 отримувати контакти замовника після взяття заявки",
+      "➕ передавати власні заявки",
+      "",
+      "Почнемо.",
       "",
       "Як до вас звертатися? (Ваше ім'я)",
     ].join("\n")
@@ -280,7 +334,7 @@ export async function handleJoinStart(
 }
 
 /* =========================================================
- * REGISTRATION MESSAGES
+ * ЗАПОВНЕННЯ АНКЕТИ
  * ========================================================= */
 
 export async function handleJoinMessage(
@@ -290,10 +344,11 @@ export async function handleJoinMessage(
   fromUser,
   text
 ) {
-  const master = await getMasterByTelegramId(
-    env,
-    fromUser.id
-  );
+  const master =
+    await getMasterByTelegramId(
+      env,
+      fromUser.id
+    );
 
   if (master) {
     return json(
@@ -302,16 +357,17 @@ export async function handleJoinMessage(
     );
   }
 
-  const app = await env.DB.prepare(`
-    SELECT *
-    FROM master_applications
-    WHERE telegram_id = ?
-      AND status = 'draft'
-    ORDER BY id DESC
-    LIMIT 1
-  `)
-    .bind(fromUser.id)
-    .first();
+  const app =
+    await env.DB.prepare(`
+      SELECT *
+      FROM master_applications
+      WHERE telegram_id = ?
+        AND status = 'draft'
+      ORDER BY id DESC
+      LIMIT 1
+    `)
+      .bind(fromUser.id)
+      .first();
 
   if (!app) {
     return json(
@@ -321,7 +377,7 @@ export async function handleJoinMessage(
   }
 
   /* -------------------------------------------------------
-   * NAME
+   * ІМ'Я
    * ----------------------------------------------------- */
 
   if (
@@ -332,13 +388,29 @@ export async function handleJoinMessage(
         fromUser.first_name
     )
   ) {
+    const firstName =
+      String(text || "").trim();
+
+    if (firstName.length < 2) {
+      await sendToMaster(
+        env,
+        chatId,
+        "❌ Введіть, будь ласка, ваше ім'я."
+      );
+
+      return json(
+        { ok: true },
+        headers
+      );
+    }
+
     await env.DB.prepare(`
       UPDATE master_applications
       SET first_name = ?
       WHERE id = ?
     `)
       .bind(
-        text,
+        firstName,
         app.id
       )
       .run();
@@ -356,18 +428,24 @@ export async function handleJoinMessage(
   }
 
   /* -------------------------------------------------------
-   * PHONE
+   * ТЕЛЕФОН
    * ----------------------------------------------------- */
 
   if (!app.phone) {
     const digits =
-      String(text).replace(/\D/g, "");
+      String(text || "")
+        .replace(/\D/g, "");
 
     if (digits.length < 9) {
       await sendToMaster(
         env,
         chatId,
-        "❌ Схоже, це не телефон. Введіть ще раз (наприклад: +380...)."
+        [
+          "❌ Схоже, це не номер телефону.",
+          "",
+          "Введіть ще раз.",
+          "Наприклад: +380XXXXXXXXX",
+        ].join("\n")
       );
 
       return json(
@@ -382,7 +460,7 @@ export async function handleJoinMessage(
       WHERE id = ?
     `)
       .bind(
-        text,
+        String(text).trim(),
         app.id
       )
       .run();
@@ -393,7 +471,10 @@ export async function handleJoinMessage(
       [
         "🛠 Яка ваша спеціалізація?",
         "",
-        "Напишіть: сантехніка, електрика або універсал",
+        "Напишіть:",
+        "• сантехніка",
+        "• електрика",
+        "• універсал",
       ].join("\n")
     );
 
@@ -404,12 +485,12 @@ export async function handleJoinMessage(
   }
 
   /* -------------------------------------------------------
-   * SPECIALIZATION
+   * СПЕЦІАЛІЗАЦІЯ
    * ----------------------------------------------------- */
 
   if (!app.specializations) {
     const lower =
-      String(text)
+      String(text || "")
         .toLowerCase()
         .trim();
 
@@ -434,7 +515,14 @@ export async function handleJoinMessage(
       await sendToMaster(
         env,
         chatId,
-        "❌ Не зрозумів. Напишіть: сантехніка, електрика або універсал."
+        [
+          "❌ Не зрозумів спеціалізацію.",
+          "",
+          "Напишіть:",
+          "• сантехніка",
+          "• електрика",
+          "• універсал",
+        ].join("\n")
       );
 
       return json(
@@ -467,17 +555,33 @@ export async function handleJoinMessage(
   }
 
   /* -------------------------------------------------------
-   * CITY
+   * МІСТО
    * ----------------------------------------------------- */
 
   if (!app.city) {
+    const city =
+      String(text || "").trim();
+
+    if (!city) {
+      await sendToMaster(
+        env,
+        chatId,
+        "❌ Вкажіть ваше місто."
+      );
+
+      return json(
+        { ok: true },
+        headers
+      );
+    }
+
     await env.DB.prepare(`
       UPDATE master_applications
       SET city = ?
       WHERE id = ?
     `)
       .bind(
-        text,
+        city,
         app.id
       )
       .run();
@@ -495,17 +599,33 @@ export async function handleJoinMessage(
   }
 
   /* -------------------------------------------------------
-   * EXPERIENCE
+   * ДОСВІД
    * ----------------------------------------------------- */
 
   if (!app.experience) {
+    const experience =
+      String(text || "").trim();
+
+    if (!experience) {
+      await sendToMaster(
+        env,
+        chatId,
+        "❌ Вкажіть ваш досвід роботи."
+      );
+
+      return json(
+        { ok: true },
+        headers
+      );
+    }
+
     await env.DB.prepare(`
       UPDATE master_applications
       SET experience = ?
       WHERE id = ?
     `)
       .bind(
-        text,
+        experience,
         app.id
       )
       .run();
@@ -523,10 +643,26 @@ export async function handleJoinMessage(
   }
 
   /* -------------------------------------------------------
-   * ABOUT + SUBMIT
+   * ПРО СЕБЕ + ВІДПРАВКА АНКЕТИ
    * ----------------------------------------------------- */
 
   if (!app.about) {
+    const about =
+      String(text || "").trim();
+
+    if (about.length < 3) {
+      await sendToMaster(
+        env,
+        chatId,
+        "❌ Напишіть кілька слів про себе."
+      );
+
+      return json(
+        { ok: true },
+        headers
+      );
+    }
+
     await env.DB.prepare(`
       UPDATE master_applications
       SET
@@ -535,7 +671,7 @@ export async function handleJoinMessage(
       WHERE id = ?
     `)
       .bind(
-        text,
+        about,
         app.id
       )
       .run();
@@ -548,7 +684,7 @@ export async function handleJoinMessage(
         "",
         "Анкету надіслано на розгляд.",
         "",
-        "Після перевірки бот повідомить результат.",
+        "Після перевірки ви отримаєте повідомлення прямо в цьому боті.",
       ].join("\n")
     );
 
@@ -565,14 +701,20 @@ export async function handleJoinMessage(
     const adminText = [
       "🆕 НОВА АНКЕТА МАЙСТРА",
       "",
-      `👤 ${appFull.first_name}`,
-      `📞 ${appFull.phone}`,
-      `🛠 ${appFull.specializations}`,
-      `🏙 ${appFull.city}`,
-      `📆 ${appFull.experience}`,
-      `💬 ${appFull.about}`,
+      `👤 ${appFull.first_name || "—"}`,
+      `📞 ${appFull.phone || "—"}`,
+      `🛠 ${appFull.specializations || "—"}`,
+      `🏙 ${appFull.city || "—"}`,
+      `📆 Досвід: ${appFull.experience || "—"}`,
+      `💬 ${appFull.about || "—"}`,
+      "",
       `🆔 Telegram: ${appFull.telegram_id}`,
-    ].join("\n");
+      appFull.username
+        ? `🔗 @${appFull.username}`
+        : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
 
     const adminButtons = [
       [
@@ -608,7 +750,7 @@ export async function handleJoinMessage(
 }
 
 /* =========================================================
- * ADMIN REVIEW
+ * РОЗГЛЯД АНКЕТИ АДМІНІСТРАТОРОМ
  * ========================================================= */
 
 export async function handleApplicationReview(
@@ -618,14 +760,15 @@ export async function handleApplicationReview(
   action,
   cq
 ) {
-  const app = await env.DB.prepare(`
-    SELECT *
-    FROM master_applications
-    WHERE id = ?
-    LIMIT 1
-  `)
-    .bind(appId)
-    .first();
+  const app =
+    await env.DB.prepare(`
+      SELECT *
+      FROM master_applications
+      WHERE id = ?
+      LIMIT 1
+    `)
+      .bind(appId)
+      .first();
 
   if (!app) {
     await answerJobsCallback(
@@ -656,10 +799,10 @@ export async function handleApplicationReview(
   }
 
   const chatId =
-    cq.message.chat.id;
+    cq.message?.chat?.id;
 
   const messageId =
-    cq.message.message_id;
+    cq.message?.message_id;
 
   const now =
     new Date().toLocaleString(
@@ -670,7 +813,7 @@ export async function handleApplicationReview(
     );
 
   /* -------------------------------------------------------
-   * REJECT
+   * ВІДХИЛИТИ
    * ----------------------------------------------------- */
 
   if (action === "reject") {
@@ -688,7 +831,7 @@ export async function handleApplicationReview(
       env,
       app.telegram_id,
       [
-        "❌ На жаль, вашу анкету відхилено.",
+        "❌ На жаль, вашу анкету не схвалено.",
         "",
         "Дякуємо за інтерес до SA-MASTER Jobs.",
       ].join("\n")
@@ -697,24 +840,29 @@ export async function handleApplicationReview(
     const rejectedText = [
       "❌ АНКЕТУ ВІДХИЛЕНО",
       "",
-      `👤 ${app.first_name}`,
-      `📞 ${app.phone}`,
-      `🛠 ${app.specializations}`,
-      `🏙 ${app.city}`,
-      `📆 ${app.experience}`,
-      `💬 ${app.about}`,
+      `👤 ${app.first_name || "—"}`,
+      `📞 ${app.phone || "—"}`,
+      `🛠 ${app.specializations || "—"}`,
+      `🏙 ${app.city || "—"}`,
+      `📆 ${app.experience || "—"}`,
+      `💬 ${app.about || "—"}`,
       `🆔 Telegram: ${app.telegram_id}`,
       "",
       `❌ Відхилено: ${now}`,
     ].join("\n");
 
-    await editMessageText(
-      env,
-      chatId,
-      messageId,
-      rejectedText,
-      []
-    );
+    if (
+      chatId != null &&
+      messageId != null
+    ) {
+      await editMessageText(
+        env,
+        chatId,
+        messageId,
+        rejectedText,
+        []
+      );
+    }
 
     await answerJobsCallback(
       env,
@@ -729,8 +877,22 @@ export async function handleApplicationReview(
   }
 
   /* -------------------------------------------------------
-   * APPROVE
+   * ПРИЙНЯТИ
    * ----------------------------------------------------- */
+
+  if (action !== "approve") {
+    await answerJobsCallback(
+      env,
+      cq.id,
+      "❓ Невідома дія",
+      true
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
 
   const existingMaster =
     await getMasterByTelegramId(
@@ -821,57 +983,70 @@ export async function handleApplicationReview(
     );
   }
 
+  const master =
+    await getMasterByTelegramId(
+      env,
+      app.telegram_id
+    );
+
   /* -------------------------------------------------------
-   * MASTER NOTIFICATION
+   * ПОВІДОМЛЕННЯ МАЙСТРУ
    * ----------------------------------------------------- */
 
   await sendToMaster(
     env,
     app.telegram_id,
     [
-      "✅ Вас прийнято до SA-MASTER Jobs!",
+      "✅ ВАС ПРИЙНЯТО ДО SA-MASTER Jobs!",
       "",
       "Ваш профіль активовано.",
       "",
-      "Тепер ви можете переглядати доступні заявки прямо в боті.",
+      "Тепер ви можете:",
       "",
-      "Контакти замовника відкриваються після того, як ви берете заявку в роботу.",
+      "📋 переглядати доступні заявки прямо в боті",
+      "🤝 брати заявки, які вам підходять",
+      "📞 отримувати контакти клієнта після взяття заявки",
+      "➕ передавати власні заявки",
+      "",
+      "Номер телефону замовника не показується іншим майстрам, доки заявку не взято в роботу.",
+      "",
+      "Оберіть дію:",
     ].join("\n"),
-    [
-      [
-        {
-          text: "📋 Доступні заявки",
-          callback_data: "jobs_list",
-        },
-      ],
-    ]
+    buildMasterMenuButtons()
   );
 
   /* -------------------------------------------------------
-   * ADMIN MESSAGE
+   * ОНОВЛЕННЯ АДМІНСЬКОГО ПОВІДОМЛЕННЯ
    * ----------------------------------------------------- */
 
   const approvedText = [
     "✅ АНКЕТУ ПРИЙНЯТО",
     "",
-    `👤 ${app.first_name}`,
-    `📞 ${app.phone}`,
-    `🛠 ${app.specializations}`,
-    `🏙 ${app.city}`,
-    `📆 ${app.experience}`,
-    `💬 ${app.about}`,
+    `👤 ${app.first_name || "—"}`,
+    `📞 ${app.phone || "—"}`,
+    `🛠 ${app.specializations || "—"}`,
+    `🏙 ${app.city || "—"}`,
+    `📆 ${app.experience || "—"}`,
+    `💬 ${app.about || "—"}`,
     `🆔 Telegram: ${app.telegram_id}`,
     "",
     `✅ Прийнято: ${now}`,
+    "",
+    "🤖 Доступ до заявок через бот активовано.",
   ].join("\n");
 
-  await editMessageText(
-    env,
-    chatId,
-    messageId,
-    approvedText,
-    []
-  );
+  if (
+    chatId != null &&
+    messageId != null
+  ) {
+    await editMessageText(
+      env,
+      chatId,
+      messageId,
+      approvedText,
+      []
+    );
+  }
 
   await answerJobsCallback(
     env,
@@ -880,7 +1055,60 @@ export async function handleApplicationReview(
   );
 
   return json(
-    { ok: true },
+    {
+      ok: true,
+      master_id:
+        master?.id || null,
+    },
     headers
   );
+}
+
+/* =========================================================
+ * СУМІСНІСТЬ ЗІ СТАРИМ КОДОМ
+ *
+ * Старий jobs.js міг імпортувати createNewMasterInvite().
+ * Групи більше немає, тому замість invite показуємо меню.
+ * Після повної заміни jobs.js цю функцію можна буде видалити.
+ * ========================================================= */
+
+export async function createNewMasterInvite(
+  env,
+  telegramId
+) {
+  const master =
+    await getMasterByTelegramId(
+      env,
+      telegramId
+    );
+
+  if (!master) {
+    return {
+      ok: false,
+      error: "MASTER_NOT_FOUND",
+    };
+  }
+
+  if (
+    master.status !==
+    MASTER_STATUS.ACTIVE
+  ) {
+    return {
+      ok: false,
+      error: "MASTER_NOT_ACTIVE",
+      status: master.status,
+    };
+  }
+
+  await sendActiveMasterMenu(
+    env,
+    master.telegram_id,
+    master
+  );
+
+  return {
+    ok: true,
+    master,
+    bot_mode: true,
+  };
 }
