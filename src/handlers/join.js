@@ -61,7 +61,7 @@ function buildMasterMenuButtons() {
     [
       {
         text: "📋 Доступні заявки",
-        callback_data: "available_jobs",
+        callback_data: "jobs_list",
       },
     ],
     [
@@ -1062,53 +1062,4 @@ export async function handleApplicationReview(
     },
     headers
   );
-}
-
-/* =========================================================
- * СУМІСНІСТЬ ЗІ СТАРИМ КОДОМ
- *
- * Старий jobs.js міг імпортувати createNewMasterInvite().
- * Групи більше немає, тому замість invite показуємо меню.
- * Після повної заміни jobs.js цю функцію можна буде видалити.
- * ========================================================= */
-
-export async function createNewMasterInvite(
-  env,
-  telegramId
-) {
-  const master =
-    await getMasterByTelegramId(
-      env,
-      telegramId
-    );
-
-  if (!master) {
-    return {
-      ok: false,
-      error: "MASTER_NOT_FOUND",
-    };
-  }
-
-  if (
-    master.status !==
-    MASTER_STATUS.ACTIVE
-  ) {
-    return {
-      ok: false,
-      error: "MASTER_NOT_ACTIVE",
-      status: master.status,
-    };
-  }
-
-  await sendActiveMasterMenu(
-    env,
-    master.telegram_id,
-    master
-  );
-
-  return {
-    ok: true,
-    master,
-    bot_mode: true,
-  };
 }
