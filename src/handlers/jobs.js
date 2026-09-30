@@ -87,22 +87,14 @@ async function handleJobsGroupServiceMessage(env, msg) {
   }
 
   if (msg.left_chat_member?.id) {
-    await setMasterMembershipStatus(
-      env,
-      msg.left_chat_member.id,
-      "inactive"
-    );
+    await setMasterMembershipStatus(env, msg.left_chat_member.id, "inactive");
     return true;
   }
 
   if (Array.isArray(msg.new_chat_members) && msg.new_chat_members.length) {
     for (const member of msg.new_chat_members) {
       if (member?.id) {
-        await setMasterMembershipStatus(
-          env,
-          member.id,
-          "active"
-        );
+        await setMasterMembershipStatus(env, member.id, "active");
       }
     }
     return true;
@@ -177,15 +169,8 @@ export async function publishRequestToJobsGroup(env, request) {
     `👤 ${request.name}`,
     `🔧 ${request.type_label || request.type}`,
     `📍 ${request.location || "—"}`,
-
-    request.project
-      ? `📐 Дизайн-проєкт: ${request.project}`
-      : null,
-
-    request.timing
-      ? `🗓 Початок: ${request.timing}`
-      : null,
-
+    request.project ? `📐 Дизайн-проєкт: ${request.project}` : null,
+    request.timing ? `🗓 Початок: ${request.timing}` : null,
     `📊 Пріоритет: ${
       request.priority === "high"
         ? "🥇 Високий"
@@ -197,18 +182,14 @@ export async function publishRequestToJobsGroup(env, request) {
     .filter(Boolean)
     .join("\n");
 
-  return sendToJobsGroup(
-    env,
-    text,
+  return sendToJobsGroup(env, text, [
     [
-      [
-        {
-          text: "🤝 Беру в роботу",
-          callback_data: `take:${request.request_code}`,
-        },
-      ],
-    ]
-  );
+      {
+        text: "🤝 Беру в роботу",
+        callback_data: `take:${request.request_code}`,
+      },
+    ],
+  ]);
 }
 
 /* =========================================================
@@ -224,10 +205,6 @@ export async function handleJobsWebhook(request, env, headers) {
     return json({ ok: false }, headers, 400);
   }
 
-  /* =======================================================
-   * ЗВИЧАЙНІ ПОВІДОМЛЕННЯ
-   * ======================================================= */
-
   if (update.message) {
     const msg = update.message;
     const chatId = msg.chat.id;
@@ -240,16 +217,11 @@ export async function handleJobsWebhook(request, env, headers) {
 
     /* -----------------------------------------------------
      * /start
+     * Новий користувач одразу переходить до анкети.
      * ----------------------------------------------------- */
 
-    if (
-      text === "/start" ||
-      text.startsWith("/start ")
-    ) {
-      const master = await getMasterByTelegramId(
-        env,
-        fromUser.id
-      );
+    if (text === "/start" || text.startsWith("/start ")) {
+      const master = await getMasterByTelegramId(env, fromUser.id);
 
       if (master && master.status === "active") {
         const masterText = [
@@ -285,13 +257,7 @@ export async function handleJobsWebhook(request, env, headers) {
           ],
         ];
 
-        await sendToMaster(
-          env,
-          chatId,
-          masterText,
-          masterButtons
-        );
-
+        await sendToMaster(env, chatId, masterText, masterButtons);
         return json({ ok: true }, headers);
       }
 
@@ -305,97 +271,36 @@ export async function handleJobsWebhook(request, env, headers) {
           "Щоб знову працювати із заявками — отримайте нове персональне запрошення.",
         ].join("\n");
 
-        await sendToMaster(
-          env,
-          chatId,
-          inactiveText,
+        await sendToMaster(env, chatId, inactiveText, [
           [
-            [
-              {
-                text: "👥 Увійти в групу заявок",
-                callback_data: "get_group_invite",
-              },
-            ],
-          ]
-        );
+            {
+              text: "👥 Увійти в групу заявок",
+              callback_data: "get_group_invite",
+            },
+          ],
+        ]);
 
         return json({ ok: true }, headers);
       }
 
       if (master && master.status === "blocked") {
-        await sendToMaster(
-          env,
-          chatId,
-          masterAccessMessage(master.status)
-        );
-
+        await sendToMaster(env, chatId, masterAccessMessage(master.status));
         return json({ ok: true }, headers);
       }
 
-      const welcomeText = [
-        "🔧 SA-MASTER Jobs",
-        "",
-        "Сервіс для обміну заявками між майстрами.",
-        "",
-        "Тут публікуються заявки на роботи, які SA-MASTER або інші майстри не можуть взяти у роботу.",
-        "",
-        "🔔 Отримуйте нові заявки",
-        "🤝 Беріть у роботу ті, які вам підходять",
-        "📞 Отримуйте контакти замовника",
-        "🔄 Передавайте іншим майстрам заявки, які не можете виконати самі",
-        "",
-        "➕ Є заявка, яку не можете взяти?",
-        "",
-        "Після реєстрації ви зможете передавати такі заявки через SA-MASTER Jobs.",
-        "",
-        "⭐ Ми розвиваємо систему винагород для майстрів, які передають якісні заявки.",
-        "",
-        "Щоб отримати доступ до заявок та можливість передавати власні заявки, пройдіть коротку реєстрацію майстра.",
-      ].join("\n");
-
-      const welcomeButtons = [
-        [
-          {
-            text: "🤝 Долучитися до SA-MASTER Jobs",
-            callback_data: "join_start",
-          },
-        ],
-      ];
-
-      await sendToMaster(
-        env,
-        chatId,
-        welcomeText,
-        welcomeButtons
-      );
-
-      return json({ ok: true }, headers);
+      return handleJoinStart(env, headers, chatId, fromUser);
     }
 
     /* -----------------------------------------------------
      * /join
-     *
-     * Повторна анкета для вже зареєстрованого майстра
-     * ніколи не запускається.
      * ----------------------------------------------------- */
 
-    if (
-      text === "/join" ||
-      text.startsWith("/join ")
-    ) {
-      const master = await getMasterByTelegramId(
-        env,
-        fromUser.id
-      );
+    if (text === "/join" || text.startsWith("/join ")) {
+      const master = await getMasterByTelegramId(env, fromUser.id);
 
       if (master) {
         if (master.status === "blocked") {
-          await sendToMaster(
-            env,
-            chatId,
-            masterAccessMessage("blocked")
-          );
-
+          await sendToMaster(env, chatId, masterAccessMessage("blocked"));
           return json({ ok: true }, headers);
         }
 
@@ -411,7 +316,6 @@ export async function handleJobsWebhook(request, env, headers) {
               "Щоб повернутися до групи заявок, виконайте /start та натисніть «👥 Увійти в групу заявок».",
             ].join("\n")
           );
-
           return json({ ok: true }, headers);
         }
 
@@ -425,7 +329,6 @@ export async function handleJobsWebhook(request, env, headers) {
               "Повторно заповнювати анкету не потрібно.",
             ].join("\n")
           );
-
           return json({ ok: true }, headers);
         }
 
@@ -438,45 +341,23 @@ export async function handleJobsWebhook(request, env, headers) {
         return json({ ok: true }, headers);
       }
 
-      return handleJoinStart(
-        env,
-        headers,
-        chatId,
-        fromUser
-      );
+      return handleJoinStart(env, headers, chatId, fromUser);
     }
 
-    return handleJoinMessage(
-      env,
-      headers,
-      chatId,
-      fromUser,
-      text
-    );
+    return handleJoinMessage(env, headers, chatId, fromUser, text);
   }
-
-  /* =======================================================
-   * CALLBACK-КНОПКИ
-   * ======================================================= */
 
   if (update.callback_query) {
     const cq = update.callback_query;
     const data = String(cq.data || "");
 
+    // Сумісність зі старими повідомленнями, де могла лишитися кнопка join_start.
     if (data === "join_start") {
-      const master = await getMasterByTelegramId(
-        env,
-        cq.from.id
-      );
+      const master = await getMasterByTelegramId(env, cq.from.id);
 
       if (master) {
         if (master.status === "active") {
-          await answerJobsCallback(
-            env,
-            cq.id,
-            "✅ Ви вже зареєстровані",
-            true
-          );
+          await answerJobsCallback(env, cq.id, "✅ Ви вже зареєстровані", true);
         } else {
           await answerJobsCallback(
             env,
@@ -491,11 +372,7 @@ export async function handleJobsWebhook(request, env, headers) {
         return json({ ok: true }, headers);
       }
 
-      await answerJobsCallback(
-        env,
-        cq.id,
-        "📝 Починаємо анкету"
-      );
+      await answerJobsCallback(env, cq.id, "📝 Починаємо анкету");
 
       return handleJoinStart(
         env,
@@ -506,17 +383,12 @@ export async function handleJobsWebhook(request, env, headers) {
     }
 
     if (data === "get_group_invite") {
-      const access = await ensureActiveMaster(
-        env,
-        cq.from.id
-      );
+      const access = await ensureActiveMaster(env, cq.from.id);
 
       const canJoin =
         access.master &&
-        (
-          access.master.status === "active" ||
-          access.master.status === "inactive"
-        );
+        (access.master.status === "active" ||
+          access.master.status === "inactive");
 
       if (!canJoin) {
         const message =
@@ -524,34 +396,20 @@ export async function handleJobsWebhook(request, env, headers) {
             ? "🚫 Ваш профіль заблоковано"
             : "❌ Ви не зареєстровані";
 
-        await answerJobsCallback(
-          env,
-          cq.id,
-          message,
-          true
-        );
-
+        await answerJobsCallback(env, cq.id, message, true);
         return json({ ok: true }, headers);
       }
 
-      const invite = await createInviteForMaster(
-        env,
-        cq.from.id
-      );
+      const invite = await createInviteForMaster(env, cq.from.id);
 
       if (!invite?.ok) {
-        console.error(
-          "Create invite for master failed:",
-          invite
-        );
-
+        console.error("Create invite for master failed:", invite);
         await answerJobsCallback(
           env,
           cq.id,
           "❌ Не вдалося перевірити доступ до групи",
           true
         );
-
         return json({ ok: true }, headers);
       }
 
@@ -562,7 +420,6 @@ export async function handleJobsWebhook(request, env, headers) {
           "✅ Ви вже перебуваєте у групі SA-MASTER Jobs",
           true
         );
-
         return json({ ok: true }, headers);
       }
 
@@ -573,16 +430,13 @@ export async function handleJobsWebhook(request, env, headers) {
           "❌ Не вдалося створити посилання",
           true
         );
-
         return json({ ok: true }, headers);
       }
 
       await answerJobsCallback(
         env,
         cq.id,
-        invite.was_unbanned
-          ? "✅ Доступ відновлено"
-          : "✅ Посилання створено"
+        invite.was_unbanned ? "✅ Доступ відновлено" : "✅ Посилання створено"
       );
 
       const inviteText = [
@@ -597,30 +451,20 @@ export async function handleJobsWebhook(request, env, headers) {
         "Якщо ви вийдете з групи — відкрийте бота та отримайте нове.",
       ].join("\n");
 
-      const inviteButtons = [
+      await sendToMaster(env, cq.message.chat.id, inviteText, [
         [
           {
             text: "👥 Приєднатися до групи",
             url: invite.invite_link,
           },
         ],
-      ];
-
-      await sendToMaster(
-        env,
-        cq.message.chat.id,
-        inviteText,
-        inviteButtons
-      );
+      ]);
 
       return json({ ok: true }, headers);
     }
 
     if (data === "submit_request") {
-      const access = await ensureActiveMaster(
-        env,
-        cq.from.id
-      );
+      const access = await ensureActiveMaster(env, cq.from.id);
 
       if (!access.active) {
         const message =
@@ -630,20 +474,11 @@ export async function handleJobsWebhook(request, env, headers) {
             ? "⚪ Спочатку поверніться до групи заявок"
             : "❌ Ви не зареєстровані";
 
-        await answerJobsCallback(
-          env,
-          cq.id,
-          message,
-          true
-        );
-
+        await answerJobsCallback(env, cq.id, message, true);
         return json({ ok: true }, headers);
       }
 
-      const referralLink = await getMasterReferralLink(
-        env,
-        cq.from.id
-      );
+      const referralLink = await getMasterReferralLink(env, cq.from.id);
 
       if (!referralLink) {
         await answerJobsCallback(
@@ -652,7 +487,6 @@ export async function handleJobsWebhook(request, env, headers) {
           "❌ Не вдалося створити посилання",
           true
         );
-
         return json({ ok: true }, headers);
       }
 
@@ -672,44 +506,25 @@ export async function handleJobsWebhook(request, env, headers) {
         "Заявка буде автоматично прив'язана до вашого профілю SA-MASTER Jobs.",
       ].join("\n");
 
-      const buttons = [
+      await sendToMaster(env, cq.message.chat.id, text, [
         [
           {
             text: "➕ Заповнити заявку",
             url: referralLink,
           },
         ],
-      ];
-
-      await sendToMaster(
-        env,
-        cq.message.chat.id,
-        text,
-        buttons
-      );
+      ]);
 
       return json({ ok: true }, headers);
     }
 
     if (data.startsWith("take:")) {
-      return handleTakeJob(
-        env,
-        headers,
-        data.slice(5),
-        cq
-      );
+      return handleTakeJob(env, headers, data.slice(5), cq);
     }
 
     if (data.startsWith("outcome:")) {
       const [, requestCode, outcome] = data.split(":");
-
-      return handleMasterOutcome(
-        env,
-        headers,
-        requestCode,
-        outcome,
-        cq
-      );
+      return handleMasterOutcome(env, headers, requestCode, outcome, cq);
     }
 
     if (data.startsWith("app_approve:")) {
@@ -732,40 +547,25 @@ export async function handleJobsWebhook(request, env, headers) {
       );
     }
 
-    await answerJobsCallback(
-      env,
-      cq.id,
-      "❓ Невідома дія",
-      true
-    );
+    await answerJobsCallback(env, cq.id, "❓ Невідома дія", true);
   }
 
   return json({ ok: true }, headers);
 }
 
 /* =========================================================
- * Перший майстер, який натиснув кнопку,
- * отримує заявку
+ * Перший майстер, який натиснув кнопку, отримує заявку
  * ========================================================= */
 
-async function handleTakeJob(
-  env,
-  headers,
-  requestCode,
-  cq
-) {
+async function handleTakeJob(env, headers, requestCode, cq) {
   const telegramMaster = cq.from;
   const telegramId = telegramMaster.id;
 
-  const masterName =
-    telegramMaster.username
-      ? `@${telegramMaster.username}`
-      : telegramMaster.first_name;
+  const masterName = telegramMaster.username
+    ? `@${telegramMaster.username}`
+    : telegramMaster.first_name;
 
-  const registeredMaster = await getMasterByTelegramId(
-    env,
-    telegramId
-  );
+  const registeredMaster = await getMasterByTelegramId(env, telegramId);
 
   if (!registeredMaster) {
     await answerJobsCallback(
@@ -774,29 +574,16 @@ async function handleTakeJob(
       "❌ Ви ще не зареєстровані в SA-MASTER Jobs. Відкрийте бота та подайте анкету.",
       true
     );
-
     return json({ ok: true }, headers);
   }
 
   if (registeredMaster.status === "blocked") {
-    await answerJobsCallback(
-      env,
-      cq.id,
-      "🚫 Ваш профіль заблоковано",
-      true
-    );
-
+    await answerJobsCallback(env, cq.id, "🚫 Ваш профіль заблоковано", true);
     return json({ ok: true }, headers);
   }
 
   if (registeredMaster.status !== "active") {
-    await answerJobsCallback(
-      env,
-      cq.id,
-      "❌ Ваш профіль неактивний",
-      true
-    );
-
+    await answerJobsCallback(env, cq.id, "❌ Ваш профіль неактивний", true);
     return json({ ok: true }, headers);
   }
 
@@ -810,13 +597,7 @@ async function handleTakeJob(
     .first();
 
   if (!req) {
-    await answerJobsCallback(
-      env,
-      cq.id,
-      "❌ Заявку не знайдено",
-      true
-    );
-
+    await answerJobsCallback(env, cq.id, "❌ Заявку не знайдено", true);
     return json({ ok: true }, headers);
   }
 
@@ -833,22 +614,11 @@ async function handleTakeJob(
       WHERE id = ?
         AND assigned_master_id IS NULL
     `)
-      .bind(
-        telegramId,
-        masterName,
-        req.id
-      )
+      .bind(telegramId, masterName, req.id)
       .run();
   } catch (err) {
     console.error("Take job failed:", err);
-
-    await answerJobsCallback(
-      env,
-      cq.id,
-      "❌ Помилка збереження",
-      true
-    );
-
+    await answerJobsCallback(env, cq.id, "❌ Помилка збереження", true);
     return json({ ok: true }, headers);
   }
 
@@ -859,7 +629,6 @@ async function handleTakeJob(
       "❌ Цю заявку вже взяли в роботу",
       true
     );
-
     return json({ ok: true }, headers);
   }
 
@@ -872,14 +641,7 @@ async function handleTakeJob(
       author_type,
       author_id
     )
-    VALUES (
-      ?,
-      ?,
-      'master_took_job',
-      ?,
-      'master',
-      ?
-    )
+    VALUES (?, ?, 'master_took_job', ?, 'master', ?)
   `)
     .bind(
       req.object_id || null,
@@ -895,12 +657,7 @@ async function handleTakeJob(
     "📊 Статус: заявка зайнята",
   ].join("\n");
 
-  await editJobsMessage(
-    env,
-    cq.message.message_id,
-    groupText,
-    []
-  );
+  await editJobsMessage(env, cq.message.message_id, groupText, []);
 
   const contactsText = [
     `✅ Ви взяли заявку ${req.request_code}`,
@@ -908,15 +665,8 @@ async function handleTakeJob(
     `👤 Клієнт: ${req.name}`,
     `📞 Телефон: ${req.phone}`,
     `📍 Об'єкт: ${req.location || "—"}`,
-
-    req.project
-      ? `📐 Дизайн-проєкт: ${req.project}`
-      : null,
-
-    req.timing
-      ? `🗓 Початок: ${req.timing}`
-      : null,
-
+    req.project ? `📐 Дизайн-проєкт: ${req.project}` : null,
+    req.timing ? `🗓 Початок: ${req.timing}` : null,
     "",
     "Після розмови — позначте результат:",
   ]
@@ -927,9 +677,7 @@ async function handleTakeJob(
     env,
     telegramId,
     contactsText,
-    buildMasterOutcomeButtons(
-      req.request_code
-    )
+    buildMasterOutcomeButtons(req.request_code)
   );
 
   await sendTelegram(
@@ -943,11 +691,7 @@ async function handleTakeJob(
     ].join("\n")
   );
 
-  await answerJobsCallback(
-    env,
-    cq.id,
-    "✅ Ви взяли заявку"
-  );
+  await answerJobsCallback(env, cq.id, "✅ Ви взяли заявку");
 
   return json({ ok: true }, headers);
 }
@@ -956,25 +700,15 @@ async function handleTakeJob(
  * Результат контакту із замовником
  * ========================================================= */
 
-async function handleMasterOutcome(
-  env,
-  headers,
-  requestCode,
-  outcome,
-  cq
-) {
+async function handleMasterOutcome(env, headers, requestCode, outcome, cq) {
   const telegramMaster = cq.from;
   const telegramId = telegramMaster.id;
 
-  const masterName =
-    telegramMaster.username
-      ? `@${telegramMaster.username}`
-      : telegramMaster.first_name;
+  const masterName = telegramMaster.username
+    ? `@${telegramMaster.username}`
+    : telegramMaster.first_name;
 
-  const registeredMaster = await getMasterByTelegramId(
-    env,
-    telegramId
-  );
+  const registeredMaster = await getMasterByTelegramId(env, telegramId);
 
   if (!registeredMaster) {
     await answerJobsCallback(
@@ -983,29 +717,16 @@ async function handleMasterOutcome(
       "❌ Ваш профіль майстра не знайдено",
       true
     );
-
     return json({ ok: true }, headers);
   }
 
   if (registeredMaster.status === "blocked") {
-    await answerJobsCallback(
-      env,
-      cq.id,
-      "🚫 Ваш профіль заблоковано",
-      true
-    );
-
+    await answerJobsCallback(env, cq.id, "🚫 Ваш профіль заблоковано", true);
     return json({ ok: true }, headers);
   }
 
   if (registeredMaster.status !== "active") {
-    await answerJobsCallback(
-      env,
-      cq.id,
-      "❌ Ваш профіль неактивний",
-      true
-    );
-
+    await answerJobsCallback(env, cq.id, "❌ Ваш профіль неактивний", true);
     return json({ ok: true }, headers);
   }
 
@@ -1017,13 +738,7 @@ async function handleMasterOutcome(
   ];
 
   if (!validOutcomes.includes(outcome)) {
-    await answerJobsCallback(
-      env,
-      cq.id,
-      "❓ Невідомий результат",
-      true
-    );
-
+    await answerJobsCallback(env, cq.id, "❓ Невідомий результат", true);
     return json({ ok: true }, headers);
   }
 
@@ -1037,27 +752,17 @@ async function handleMasterOutcome(
     .first();
 
   if (!req) {
-    await answerJobsCallback(
-      env,
-      cq.id,
-      "❌ Заявку не знайдено",
-      true
-    );
-
+    await answerJobsCallback(env, cq.id, "❌ Заявку не знайдено", true);
     return json({ ok: true }, headers);
   }
 
-  if (
-    String(req.assigned_master_id || "") !==
-    String(telegramId)
-  ) {
+  if (String(req.assigned_master_id || "") !== String(telegramId)) {
     await answerJobsCallback(
       env,
       cq.id,
       "❌ Ця заявка більше не закріплена за вами",
       true
     );
-
     return json({ ok: true }, headers);
   }
 
@@ -1070,11 +775,7 @@ async function handleMasterOutcome(
       )
       VALUES (?, ?, ?)
     `)
-      .bind(
-        req.id,
-        telegramId,
-        outcome
-      )
+      .bind(req.id, telegramId, outcome)
       .run();
   } catch (err) {
     console.error("Save outcome failed:", err);
@@ -1084,9 +785,7 @@ async function handleMasterOutcome(
     await env.DB.batch([
       env.DB.prepare(`
         UPDATE masters
-        SET
-          good_deals_count =
-            COALESCE(good_deals_count, 0) + 1
+        SET good_deals_count = COALESCE(good_deals_count, 0) + 1
         WHERE telegram_id = ?
           AND status = 'active'
       `).bind(telegramId),
@@ -1108,14 +807,7 @@ async function handleMasterOutcome(
           author_type,
           author_id
         )
-        VALUES (
-          ?,
-          ?,
-          'master_working',
-          ?,
-          'master',
-          ?
-        )
+        VALUES (?, ?, 'master_working', ?, 'master', ?)
       `).bind(
         req.object_id || null,
         req.id,
@@ -1124,12 +816,7 @@ async function handleMasterOutcome(
       ),
     ]);
 
-    await answerJobsCallback(
-      env,
-      cq.id,
-      "✅ Дякую! Заявка в роботі"
-    );
-
+    await answerJobsCallback(env, cq.id, "✅ Дякую! Заявка в роботі");
     await sendToMaster(
       env,
       telegramId,
@@ -1141,8 +828,7 @@ async function handleMasterOutcome(
     await env.DB.batch([
       env.DB.prepare(`
         UPDATE masters
-        SET no_answer_count =
-          COALESCE(no_answer_count, 0) + 1
+        SET no_answer_count = COALESCE(no_answer_count, 0) + 1
         WHERE telegram_id = ?
           AND status = 'active'
       `).bind(telegramId),
@@ -1166,14 +852,7 @@ async function handleMasterOutcome(
           author_type,
           author_id
         )
-        VALUES (
-          ?,
-          ?,
-          'client_no_answer',
-          ?,
-          'master',
-          ?
-        )
+        VALUES (?, ?, 'client_no_answer', ?, 'master', ?)
       `).bind(
         req.object_id || null,
         req.id,
@@ -1185,8 +864,7 @@ async function handleMasterOutcome(
         ? [
             env.DB.prepare(`
               UPDATE clients
-              SET no_answer_count =
-                COALESCE(no_answer_count, 0) + 1
+              SET no_answer_count = COALESCE(no_answer_count, 0) + 1
               WHERE id = ?
             `).bind(req.client_id),
           ]
@@ -1202,24 +880,16 @@ async function handleMasterOutcome(
       "⚠️ Попередній майстер не зміг додзвонитись",
     ].join("\n");
 
-    await sendToJobsGroup(
-      env,
-      text,
+    await sendToJobsGroup(env, text, [
       [
-        [
-          {
-            text: "🤝 Беру в роботу",
-            callback_data: `take:${req.request_code}`,
-          },
-        ],
-      ]
-    );
+        {
+          text: "🤝 Беру в роботу",
+          callback_data: `take:${req.request_code}`,
+        },
+      ],
+    ]);
 
-    await answerJobsCallback(
-      env,
-      cq.id,
-      "✅ Заявка повернута в канал"
-    );
+    await answerJobsCallback(env, cq.id, "✅ Заявка повернута в канал");
 
     await sendToMaster(
       env,
@@ -1237,8 +907,7 @@ async function handleMasterOutcome(
     await env.DB.batch([
       env.DB.prepare(`
         UPDATE masters
-        SET weird_client_count =
-          COALESCE(weird_client_count, 0) + 1
+        SET weird_client_count = COALESCE(weird_client_count, 0) + 1
         WHERE telegram_id = ?
           AND status = 'active'
       `).bind(telegramId),
@@ -1260,14 +929,7 @@ async function handleMasterOutcome(
           author_type,
           author_id
         )
-        VALUES (
-          ?,
-          ?,
-          'weird_client',
-          ?,
-          'master',
-          ?
-        )
+        VALUES (?, ?, 'weird_client', ?, 'master', ?)
       `).bind(
         req.object_id || null,
         req.id,
@@ -1279,25 +941,15 @@ async function handleMasterOutcome(
         ? [
             env.DB.prepare(`
               UPDATE clients
-              SET weird_count =
-                COALESCE(weird_count, 0) + 1
+              SET weird_count = COALESCE(weird_count, 0) + 1
               WHERE id = ?
             `).bind(req.client_id),
           ]
         : []),
     ]);
 
-    await answerJobsCallback(
-      env,
-      cq.id,
-      "⚠️ Позначено. Дякую!"
-    );
-
-    await sendToMaster(
-      env,
-      telegramId,
-      "Заявку закрито. Дякую за сигнал!"
-    );
+    await answerJobsCallback(env, cq.id, "⚠️ Позначено. Дякую!");
+    await sendToMaster(env, telegramId, "Заявку закрито. Дякую за сигнал!");
 
     await sendTelegram(
       env,
@@ -1326,14 +978,7 @@ async function handleMasterOutcome(
           author_type,
           author_id
         )
-        VALUES (
-          ?,
-          ?,
-          'not_suitable',
-          ?,
-          'master',
-          ?
-        )
+        VALUES (?, ?, 'not_suitable', ?, 'master', ?)
       `).bind(
         req.object_id || null,
         req.id,
@@ -1361,17 +1006,8 @@ async function handleMasterOutcome(
       ]
     );
 
-    await answerJobsCallback(
-      env,
-      cq.id,
-      "✅ Заявка повернута в канал"
-    );
-
-    await sendToMaster(
-      env,
-      telegramId,
-      "Заявку повернуто в канал"
-    );
+    await answerJobsCallback(env, cq.id, "✅ Заявка повернута в канал");
+    await sendToMaster(env, telegramId, "Заявку повернуто в канал");
   }
 
   return json({ ok: true }, headers);
