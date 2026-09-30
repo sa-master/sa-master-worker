@@ -124,7 +124,6 @@ async function getMasterReferralLink(env, telegramId) {
 
   let token = master.referral_token;
 
-  /* Якщо токена ще немає — створюємо */
   if (!token) {
     token = crypto.randomUUID().replaceAll("-", "");
 
@@ -141,9 +140,6 @@ async function getMasterReferralLink(env, telegramId) {
         .bind(token, master.id)
         .run();
 
-      /*
-       * На випадок одночасних запитів перечитуємо значення.
-       */
       const updatedMaster = await env.DB.prepare(`
         SELECT referral_token, status
         FROM masters
@@ -153,27 +149,18 @@ async function getMasterReferralLink(env, telegramId) {
         .bind(master.id)
         .first();
 
-      if (
-        !updatedMaster ||
-        updatedMaster.status !== "active"
-      ) {
+      if (!updatedMaster || updatedMaster.status !== "active") {
         return null;
       }
 
-      token =
-        updatedMaster.referral_token || token;
+      token = updatedMaster.referral_token || token;
     } catch (err) {
-      console.error(
-        "Referral token generation failed:",
-        err
-      );
-
+      console.error("Referral token generation failed:", err);
       return null;
     }
   }
 
   const url = new URL(SITE_URL);
-
   url.searchParams.set("ref", token);
 
   return url.toString();
@@ -183,10 +170,7 @@ async function getMasterReferralLink(env, telegramId) {
  * Публікація заявки в групу майстрів
  * ========================================================= */
 
-export async function publishRequestToJobsGroup(
-  env,
-  request
-) {
+export async function publishRequestToJobsGroup(env, request) {
   const text = [
     "🔔 НОВА ЗАЯВКА",
     `🆔 ${request.request_code}`,
@@ -220,8 +204,7 @@ export async function publishRequestToJobsGroup(
       [
         {
           text: "🤝 Беру в роботу",
-          callback_data:
-            `take:${request.request_code}`,
+          callback_data: `take:${request.request_code}`,
         },
       ],
     ]
@@ -232,21 +215,13 @@ export async function publishRequestToJobsGroup(
  * POST /jobs-webhook
  * ========================================================= */
 
-export async function handleJobsWebhook(
-  request,
-  env,
-  headers
-) {
+export async function handleJobsWebhook(request, env, headers) {
   let update;
 
   try {
     update = await request.json();
   } catch {
-    return json(
-      { ok: false },
-      headers,
-      400
-    );
+    return json({ ok: false }, headers, 400);
   }
 
   /* =======================================================
@@ -257,14 +232,10 @@ export async function handleJobsWebhook(
     const msg = update.message;
     const chatId = msg.chat.id;
     const fromUser = msg.from;
-    const text =
-      String(msg.text || "").trim();
+    const text = String(msg.text || "").trim();
 
     if (await handleJobsGroupServiceMessage(env, msg)) {
-      return json(
-        { ok: true },
-        headers
-      );
+      return json({ ok: true }, headers);
     }
 
     /* -----------------------------------------------------
@@ -275,20 +246,12 @@ export async function handleJobsWebhook(
       text === "/start" ||
       text.startsWith("/start ")
     ) {
-      const master =
-        await getMasterByTelegramId(
-          env,
-          fromUser.id
-        );
+      const master = await getMasterByTelegramId(
+        env,
+        fromUser.id
+      );
 
-      /* ---------------------------------------------------
-       * АКТИВНИЙ МАЙСТЕР
-       * --------------------------------------------------- */
-
-      if (
-        master &&
-        master.status === "active"
-      ) {
+      if (master && master.status === "active") {
         const masterText = [
           "🔧 SA-MASTER Jobs",
           "",
@@ -329,20 +292,10 @@ export async function handleJobsWebhook(
           masterButtons
         );
 
-        return json(
-          { ok: true },
-          headers
-        );
+        return json({ ok: true }, headers);
       }
 
-      /* ---------------------------------------------------
-       * НЕАКТИВНИЙ МАЙСТЕР — сам вийшов із групи
-       * --------------------------------------------------- */
-
-      if (
-        master &&
-        master.status === "inactive"
-      ) {
+      if (master && master.status === "inactive") {
         const inactiveText = [
           "🔧 SA-MASTER Jobs",
           "",
@@ -366,39 +319,18 @@ export async function handleJobsWebhook(
           ]
         );
 
-        return json(
-          { ok: true },
-          headers
-        );
+        return json({ ok: true }, headers);
       }
 
-      /* ---------------------------------------------------
-       * ЗАБЛОКОВАНИЙ МАЙСТЕР
-       * --------------------------------------------------- */
-
-      if (
-        master &&
-        (
-          master.status === "blocked"
-        )
-      ) {
+      if (master && master.status === "blocked") {
         await sendToMaster(
           env,
           chatId,
-          masterAccessMessage(
-            master.status
-          )
+          masterAccessMessage(master.status)
         );
 
-        return json(
-          { ok: true },
-          headers
-        );
+        return json({ ok: true }, headers);
       }
-
-      /* ---------------------------------------------------
-       * НОВИЙ / НЕЗАРЕЄСТРОВАНИЙ КОРИСТУВАЧ
-       * --------------------------------------------------- */
 
       const welcomeText = [
         "🔧 SA-MASTER Jobs",
@@ -424,10 +356,8 @@ export async function handleJobsWebhook(
       const welcomeButtons = [
         [
           {
-            text:
-              "🤝 Долучитися до SA-MASTER Jobs",
-            callback_data:
-              "join_start",
+            text: "🤝 Долучитися до SA-MASTER Jobs",
+            callback_data: "join_start",
           },
         ],
       ];
@@ -439,42 +369,73 @@ export async function handleJobsWebhook(
         welcomeButtons
       );
 
-      return json(
-        { ok: true },
-        headers
-      );
+      return json({ ok: true }, headers);
     }
 
     /* -----------------------------------------------------
      * /join
+     *
+     * Повторна анкета для вже зареєстрованого майстра
+     * ніколи не запускається.
      * ----------------------------------------------------- */
 
     if (
       text === "/join" ||
       text.startsWith("/join ")
     ) {
-      const master =
-        await getMasterByTelegramId(
-          env,
-          fromUser.id
-        );
+      const master = await getMasterByTelegramId(
+        env,
+        fromUser.id
+      );
 
-      if (
-        master &&
-        master.status !== "active"
-      ) {
+      if (master) {
+        if (master.status === "blocked") {
+          await sendToMaster(
+            env,
+            chatId,
+            masterAccessMessage("blocked")
+          );
+
+          return json({ ok: true }, headers);
+        }
+
+        if (master.status === "inactive") {
+          await sendToMaster(
+            env,
+            chatId,
+            [
+              "⚪ Ваш профіль SA-MASTER Jobs уже зареєстрований.",
+              "",
+              "Повторно заповнювати анкету не потрібно.",
+              "",
+              "Щоб повернутися до групи заявок, виконайте /start та натисніть «👥 Увійти в групу заявок».",
+            ].join("\n")
+          );
+
+          return json({ ok: true }, headers);
+        }
+
+        if (master.status === "active") {
+          await sendToMaster(
+            env,
+            chatId,
+            [
+              "✅ Ви вже зареєстровані в SA-MASTER Jobs.",
+              "",
+              "Повторно заповнювати анкету не потрібно.",
+            ].join("\n")
+          );
+
+          return json({ ok: true }, headers);
+        }
+
         await sendToMaster(
           env,
           chatId,
-          masterAccessMessage(
-            master.status
-          )
+          "⚠️ Ваш профіль уже існує. Зверніться до адміністратора для перевірки доступу."
         );
 
-        return json(
-          { ok: true },
-          headers
-        );
+        return json({ ok: true }, headers);
       }
 
       return handleJoinStart(
@@ -484,10 +445,6 @@ export async function handleJobsWebhook(
         fromUser
       );
     }
-
-    /* -----------------------------------------------------
-     * Відповіді під час анкети
-     * ----------------------------------------------------- */
 
     return handleJoinMessage(
       env,
@@ -503,22 +460,14 @@ export async function handleJobsWebhook(
    * ======================================================= */
 
   if (update.callback_query) {
-    const cq =
-      update.callback_query;
-
-    const data =
-      String(cq.data || "");
-
-    /* -----------------------------------------------------
-     * Почати реєстрацію
-     * ----------------------------------------------------- */
+    const cq = update.callback_query;
+    const data = String(cq.data || "");
 
     if (data === "join_start") {
-      const master =
-        await getMasterByTelegramId(
-          env,
-          cq.from.id
-        );
+      const master = await getMasterByTelegramId(
+        env,
+        cq.from.id
+      );
 
       if (master) {
         if (master.status === "active") {
@@ -539,10 +488,7 @@ export async function handleJobsWebhook(
           );
         }
 
-        return json(
-          { ok: true },
-          headers
-        );
+        return json({ ok: true }, headers);
       }
 
       await answerJobsCallback(
@@ -559,22 +505,11 @@ export async function handleJobsWebhook(
       );
     }
 
-    /* -----------------------------------------------------
-     * Отримати доступ до групи
-     *
-     * createInviteForMaster:
-     * - якщо майстер уже в групі — нове посилання не створює;
-     * - якщо left — створює нове персональне посилання;
-     * - якщо kicked — спочатку розблоковує, потім створює
-     *   нове персональне посилання.
-     * ----------------------------------------------------- */
-
     if (data === "get_group_invite") {
-      const access =
-        await ensureActiveMaster(
-          env,
-          cq.from.id
-        );
+      const access = await ensureActiveMaster(
+        env,
+        cq.from.id
+      );
 
       const canJoin =
         access.master &&
@@ -596,17 +531,13 @@ export async function handleJobsWebhook(
           true
         );
 
-        return json(
-          { ok: true },
-          headers
-        );
+        return json({ ok: true }, headers);
       }
 
-      const invite =
-        await createInviteForMaster(
-          env,
-          cq.from.id
-        );
+      const invite = await createInviteForMaster(
+        env,
+        cq.from.id
+      );
 
       if (!invite?.ok) {
         console.error(
@@ -621,10 +552,7 @@ export async function handleJobsWebhook(
           true
         );
 
-        return json(
-          { ok: true },
-          headers
-        );
+        return json({ ok: true }, headers);
       }
 
       if (invite.already_member) {
@@ -635,10 +563,7 @@ export async function handleJobsWebhook(
           true
         );
 
-        return json(
-          { ok: true },
-          headers
-        );
+        return json({ ok: true }, headers);
       }
 
       if (!invite.invite_link) {
@@ -649,10 +574,7 @@ export async function handleJobsWebhook(
           true
         );
 
-        return json(
-          { ok: true },
-          headers
-        );
+        return json({ ok: true }, headers);
       }
 
       await answerJobsCallback(
@@ -691,22 +613,14 @@ export async function handleJobsWebhook(
         inviteButtons
       );
 
-      return json(
-        { ok: true },
-        headers
-      );
+      return json({ ok: true }, headers);
     }
 
-    /* -----------------------------------------------------
-     * Передати заявку
-     * ----------------------------------------------------- */
-
     if (data === "submit_request") {
-      const access =
-        await ensureActiveMaster(
-          env,
-          cq.from.id
-        );
+      const access = await ensureActiveMaster(
+        env,
+        cq.from.id
+      );
 
       if (!access.active) {
         const message =
@@ -723,17 +637,13 @@ export async function handleJobsWebhook(
           true
         );
 
-        return json(
-          { ok: true },
-          headers
-        );
+        return json({ ok: true }, headers);
       }
 
-      const referralLink =
-        await getMasterReferralLink(
-          env,
-          cq.from.id
-        );
+      const referralLink = await getMasterReferralLink(
+        env,
+        cq.from.id
+      );
 
       if (!referralLink) {
         await answerJobsCallback(
@@ -743,17 +653,10 @@ export async function handleJobsWebhook(
           true
         );
 
-        return json(
-          { ok: true },
-          headers
-        );
+        return json({ ok: true }, headers);
       }
 
-      await answerJobsCallback(
-        env,
-        cq.id,
-        ""
-      );
+      await answerJobsCallback(env, cq.id, "");
 
       const text = [
         "➕ ПЕРЕДАТИ ЗАЯВКУ",
@@ -772,8 +675,7 @@ export async function handleJobsWebhook(
       const buttons = [
         [
           {
-            text:
-              "➕ Заповнити заявку",
+            text: "➕ Заповнити заявку",
             url: referralLink,
           },
         ],
@@ -786,15 +688,8 @@ export async function handleJobsWebhook(
         buttons
       );
 
-      return json(
-        { ok: true },
-        headers
-      );
+      return json({ ok: true }, headers);
     }
-
-    /* -----------------------------------------------------
-     * Взяти заявку
-     * ----------------------------------------------------- */
 
     if (data.startsWith("take:")) {
       return handleTakeJob(
@@ -805,16 +700,8 @@ export async function handleJobsWebhook(
       );
     }
 
-    /* -----------------------------------------------------
-     * Результат контакту
-     * ----------------------------------------------------- */
-
     if (data.startsWith("outcome:")) {
-      const [
-        ,
-        requestCode,
-        outcome,
-      ] = data.split(":");
+      const [, requestCode, outcome] = data.split(":");
 
       return handleMasterOutcome(
         env,
@@ -825,15 +712,7 @@ export async function handleJobsWebhook(
       );
     }
 
-    /* -----------------------------------------------------
-     * Прийняття анкети
-     * ----------------------------------------------------- */
-
-    if (
-      data.startsWith(
-        "app_approve:"
-      )
-    ) {
+    if (data.startsWith("app_approve:")) {
       return handleApplicationReview(
         env,
         headers,
@@ -843,15 +722,7 @@ export async function handleJobsWebhook(
       );
     }
 
-    /* -----------------------------------------------------
-     * Відхилення анкети
-     * ----------------------------------------------------- */
-
-    if (
-      data.startsWith(
-        "app_reject:"
-      )
-    ) {
+    if (data.startsWith("app_reject:")) {
       return handleApplicationReview(
         env,
         headers,
@@ -869,10 +740,7 @@ export async function handleJobsWebhook(
     );
   }
 
-  return json(
-    { ok: true },
-    headers
-  );
+  return json({ ok: true }, headers);
 }
 
 /* =========================================================
@@ -886,26 +754,18 @@ async function handleTakeJob(
   requestCode,
   cq
 ) {
-  const telegramMaster =
-    cq.from;
-
-  const telegramId =
-    telegramMaster.id;
+  const telegramMaster = cq.from;
+  const telegramId = telegramMaster.id;
 
   const masterName =
     telegramMaster.username
       ? `@${telegramMaster.username}`
       : telegramMaster.first_name;
 
-  const registeredMaster =
-    await getMasterByTelegramId(
-      env,
-      telegramId
-    );
-
-  /* -------------------------------------------------------
-   * Перевірка доступу ДО отримання заявки
-   * ------------------------------------------------------- */
+  const registeredMaster = await getMasterByTelegramId(
+    env,
+    telegramId
+  );
 
   if (!registeredMaster) {
     await answerJobsCallback(
@@ -915,16 +775,10 @@ async function handleTakeJob(
       true
     );
 
-    return json(
-      { ok: true },
-      headers
-    );
+    return json({ ok: true }, headers);
   }
 
-  if (
-    registeredMaster.status ===
-    "blocked"
-  ) {
+  if (registeredMaster.status === "blocked") {
     await answerJobsCallback(
       env,
       cq.id,
@@ -932,16 +786,10 @@ async function handleTakeJob(
       true
     );
 
-    return json(
-      { ok: true },
-      headers
-    );
+    return json({ ok: true }, headers);
   }
 
-  if (
-    registeredMaster.status !==
-    "active"
-  ) {
+  if (registeredMaster.status !== "active") {
     await answerJobsCallback(
       env,
       cq.id,
@@ -949,21 +797,17 @@ async function handleTakeJob(
       true
     );
 
-    return json(
-      { ok: true },
-      headers
-    );
+    return json({ ok: true }, headers);
   }
 
-  const req =
-    await env.DB.prepare(`
-      SELECT *
-      FROM requests
-      WHERE request_code = ?
-      LIMIT 1
-    `)
-      .bind(requestCode)
-      .first();
+  const req = await env.DB.prepare(`
+    SELECT *
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `)
+    .bind(requestCode)
+    .first();
 
   if (!req) {
     await answerJobsCallback(
@@ -973,37 +817,30 @@ async function handleTakeJob(
       true
     );
 
-    return json(
-      { ok: true },
-      headers
-    );
+    return json({ ok: true }, headers);
   }
 
   let assigned;
 
   try {
-    assigned =
-      await env.DB.prepare(`
-        UPDATE requests
-        SET
-          assigned_master_id = ?,
-          assigned_master_name = ?,
-          assigned_at = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-          AND assigned_master_id IS NULL
-      `)
-        .bind(
-          telegramId,
-          masterName,
-          req.id
-        )
-        .run();
+    assigned = await env.DB.prepare(`
+      UPDATE requests
+      SET
+        assigned_master_id = ?,
+        assigned_master_name = ?,
+        assigned_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+        AND assigned_master_id IS NULL
+    `)
+      .bind(
+        telegramId,
+        masterName,
+        req.id
+      )
+      .run();
   } catch (err) {
-    console.error(
-      "Take job failed:",
-      err
-    );
+    console.error("Take job failed:", err);
 
     await answerJobsCallback(
       env,
@@ -1012,10 +849,7 @@ async function handleTakeJob(
       true
     );
 
-    return json(
-      { ok: true },
-      headers
-    );
+    return json({ ok: true }, headers);
   }
 
   if (!assigned.meta?.changes) {
@@ -1026,10 +860,7 @@ async function handleTakeJob(
       true
     );
 
-    return json(
-      { ok: true },
-      headers
-    );
+    return json({ ok: true }, headers);
   }
 
   await env.DB.prepare(`
@@ -1118,10 +949,7 @@ async function handleTakeJob(
     "✅ Ви взяли заявку"
   );
 
-  return json(
-    { ok: true },
-    headers
-  );
+  return json({ ok: true }, headers);
 }
 
 /* =========================================================
@@ -1135,22 +963,18 @@ async function handleMasterOutcome(
   outcome,
   cq
 ) {
-  const telegramMaster =
-    cq.from;
-
-  const telegramId =
-    telegramMaster.id;
+  const telegramMaster = cq.from;
+  const telegramId = telegramMaster.id;
 
   const masterName =
     telegramMaster.username
       ? `@${telegramMaster.username}`
       : telegramMaster.first_name;
 
-  const registeredMaster =
-    await getMasterByTelegramId(
-      env,
-      telegramId
-    );
+  const registeredMaster = await getMasterByTelegramId(
+    env,
+    telegramId
+  );
 
   if (!registeredMaster) {
     await answerJobsCallback(
@@ -1160,16 +984,10 @@ async function handleMasterOutcome(
       true
     );
 
-    return json(
-      { ok: true },
-      headers
-    );
+    return json({ ok: true }, headers);
   }
 
-  if (
-    registeredMaster.status ===
-    "blocked"
-  ) {
+  if (registeredMaster.status === "blocked") {
     await answerJobsCallback(
       env,
       cq.id,
@@ -1177,16 +995,10 @@ async function handleMasterOutcome(
       true
     );
 
-    return json(
-      { ok: true },
-      headers
-    );
+    return json({ ok: true }, headers);
   }
 
-  if (
-    registeredMaster.status !==
-    "active"
-  ) {
+  if (registeredMaster.status !== "active") {
     await answerJobsCallback(
       env,
       cq.id,
@@ -1194,10 +1006,7 @@ async function handleMasterOutcome(
       true
     );
 
-    return json(
-      { ok: true },
-      headers
-    );
+    return json({ ok: true }, headers);
   }
 
   const validOutcomes = [
@@ -1207,9 +1016,7 @@ async function handleMasterOutcome(
     "too_expensive",
   ];
 
-  if (
-    !validOutcomes.includes(outcome)
-  ) {
+  if (!validOutcomes.includes(outcome)) {
     await answerJobsCallback(
       env,
       cq.id,
@@ -1217,21 +1024,17 @@ async function handleMasterOutcome(
       true
     );
 
-    return json(
-      { ok: true },
-      headers
-    );
+    return json({ ok: true }, headers);
   }
 
-  const req =
-    await env.DB.prepare(`
-      SELECT *
-      FROM requests
-      WHERE request_code = ?
-      LIMIT 1
-    `)
-      .bind(requestCode)
-      .first();
+  const req = await env.DB.prepare(`
+    SELECT *
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `)
+    .bind(requestCode)
+    .first();
 
   if (!req) {
     await answerJobsCallback(
@@ -1241,10 +1044,7 @@ async function handleMasterOutcome(
       true
     );
 
-    return json(
-      { ok: true },
-      headers
-    );
+    return json({ ok: true }, headers);
   }
 
   if (
@@ -1258,10 +1058,7 @@ async function handleMasterOutcome(
       true
     );
 
-    return json(
-      { ok: true },
-      headers
-    );
+    return json({ ok: true }, headers);
   }
 
   try {
@@ -1280,15 +1077,8 @@ async function handleMasterOutcome(
       )
       .run();
   } catch (err) {
-    console.error(
-      "Save outcome failed:",
-      err
-    );
+    console.error("Save outcome failed:", err);
   }
-
-  /* =======================================================
-   * ЗАЯВКА В РОБОТІ
-   * ======================================================= */
 
   if (outcome === "working") {
     await env.DB.batch([
@@ -1346,10 +1136,6 @@ async function handleMasterOutcome(
       "✅ Заявка переведена в статус «У роботі». Успіхів!"
     );
   }
-
-  /* =======================================================
-   * КЛІЄНТ НЕ ВІДПОВІДАЄ
-   * ======================================================= */
 
   if (outcome === "no_answer") {
     await env.DB.batch([
@@ -1422,10 +1208,8 @@ async function handleMasterOutcome(
       [
         [
           {
-            text:
-              "🤝 Беру в роботу",
-            callback_data:
-              `take:${req.request_code}`,
+            text: "🤝 Беру в роботу",
+            callback_data: `take:${req.request_code}`,
           },
         ],
       ]
@@ -1448,10 +1232,6 @@ async function handleMasterOutcome(
       `⚠️ ${masterName} повідомив: клієнт ${req.name} (${req.request_code}) не відповідає`
     );
   }
-
-  /* =======================================================
-   * ДИВНИЙ КЛІЄНТ
-   * ======================================================= */
 
   if (outcome === "weird_client") {
     await env.DB.batch([
@@ -1525,10 +1305,6 @@ async function handleMasterOutcome(
     );
   }
 
-  /* =======================================================
-   * НЕ ПІДХОДИТЬ
-   * ======================================================= */
-
   if (outcome === "too_expensive") {
     await env.DB.batch([
       env.DB.prepare(`
@@ -1578,10 +1354,8 @@ async function handleMasterOutcome(
       [
         [
           {
-            text:
-              "🤝 Беру в роботу",
-            callback_data:
-              `take:${req.request_code}`,
+            text: "🤝 Беру в роботу",
+            callback_data: `take:${req.request_code}`,
           },
         ],
       ]
@@ -1600,8 +1374,5 @@ async function handleMasterOutcome(
     );
   }
 
-  return json(
-    { ok: true },
-    headers
-  );
+  return json({ ok: true }, headers);
 }
