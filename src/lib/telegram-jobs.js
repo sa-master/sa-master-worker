@@ -49,23 +49,10 @@ async function callJobsBot(env, method, payload = {}) {
 }
 
 /* =========================================================
- * TELEGRAM-ДОСТУПНІСТЬ МАЙСТРА
- *
- * masters.status:
- *   active   = активний у SA-MASTER Jobs
- *   inactive = профіль деактивований адміністратором
- *   blocked  = профіль заблокований адміністратором
- *
- * masters.bot_status:
- *   unknown     = ще не перевірено
- *   available   = бот може зв'язатися з майстром
- *   unavailable = Telegram не дозволяє зв'язатися
- *
- * ВАЖЛИВО:
- * Telegram-доступність НЕ змінює masters.status.
+ * TELEGRAM DELIVERY STATUS
  * ========================================================= */
 
-function isMasterTelegramUnavailable(result) {
+function isBotUnavailable(result) {
   if (!result || result.ok) {
     return false;
   }
@@ -78,52 +65,41 @@ function isMasterTelegramUnavailable(result) {
     result.description || ""
   ).toLowerCase();
 
-  /*
-   * Фіксуємо unavailable лише для відповідей,
-   * які дійсно означають недоступність приватного
-   * чату з користувачем.
-   */
-  if (errorCode === 403) {
-    return (
-      description.includes(
-        "bot was blocked by the user"
-      ) ||
-      description.includes(
-        "user is deactivated"
-      ) ||
-      description.includes(
-        "bot can't initiate conversation with a user"
-      )
-    );
+  if (errorCode !== 403) {
+    return false;
   }
 
-  /*
-   * Telegram іноді повертає 400 для чату,
-   * який більше недоступний.
-   */
-  if (errorCode === 400) {
-    return (
-      description.includes("chat not found")
-    );
-  }
-
-  return false;
+  return (
+    description.includes(
+      "bot was blocked by the user"
+    ) ||
+    description.includes(
+      "user is deactivated"
+    ) ||
+    description.includes(
+      "bot can't initiate conversation with a user"
+    ) ||
+    description.includes(
+      "forbidden"
+    )
+  );
 }
 
 /* =========================================================
- * ЗАПИС BOT STATUS
+ * MASTER STATUS
+ *
+ * active   = бот доступний
+ * inactive = майстер заблокував / видалив бот
+ * blocked  = заблокований адміністратором
+ *
+ * blocked НІКОЛИ автоматично не змінюємо.
  * ========================================================= */
 
-async function setMasterBotStatus(
+async function markMasterInactive(
   env,
-  telegramId,
-  botStatus
+  telegramId
 ) {
-  if (
-    !env?.DB ||
-    telegramId == null ||
-    !["available", "unavailable"].includes(botStatus)
-  ) {
+  if (!env?.DB || telegramId == null) {
     return;
   }
 
@@ -131,31 +107,106 @@ async function setMasterBotStatus(
     const result = await env.DB.prepare(`
       UPDATE masters
       SET
-        bot_status = ?,
-        bot_status_checked_at = CURRENT_TIMESTAMP
+        status = 'inactive',
+        bot_status = 'unavailable',
+        bot_status_checked_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
       WHERE telegram_id = ?
+        AND status = 'active'
     `)
-      .bind(
-        botStatus,
-        telegramId
-      )
+      .bind(telegramId)
       .run();
 
     if (result.meta?.changes) {
       console.log(
-        `Master ${telegramId} bot_status -> ${botStatus}`
+        `Master ${telegramId}: active -> inactive`
       );
     }
   } catch (err) {
     console.error(
-      `Failed to update bot_status for master ${telegramId}:`,
+      `Failed to mark master ${telegramId} inactive:`,
+      err
+    );
+  }
+}
+
+async function markMasterAvailable(
+  env,
+  telegramId
+) {
+  if (!env?.DB || telegramId == null) {
+    return;
+  }
+
+  try {
+    await env.DB.prepare(`
+      UPDATE masters
+      SET
+        bot_status = 'available',
+        bot_status_checked_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE telegram_id = ?
+        AND status != 'blocked'
+    `)
+      .bind(telegramId)
+      .run();
+  } catch (err) {
+    console.error(
+      `Failed to mark master ${telegramId} available:`,
       err
     );
   }
 }
 
 /* =========================================================
- * ОБРОБКА РЕЗУЛЬТАТУ ДОСТАВКИ
+ * ВІДНОВЛЕННЯ МАЙСТРА
+ *
+ * Викликається, коли ми ТОЧНО знаємо, що майстер
+ * знову взаємодіє з ботом.
+ *
+ * inactive -> active
+ * blocked залишається blocked
+ * ========================================================= */
+
+export async function activateMasterBot(
+  env,
+  telegramId
+) {
+  if (!env?.DB || telegramId == null) {
+    return null;
+  }
+
+  try {
+    const result = await env.DB.prepare(`
+      UPDATE masters
+      SET
+        status = CASE
+          WHEN status = 'inactive'
+            THEN 'active'
+          ELSE status
+        END,
+        bot_status = 'available',
+        bot_status_checked_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE telegram_id = ?
+        AND status != 'blocked'
+    `)
+      .bind(telegramId)
+      .run();
+
+    return result;
+  } catch (err) {
+    console.error(
+      `Failed to activate master ${telegramId}:`,
+      err
+    );
+
+    return null;
+  }
+}
+
+/* =========================================================
+ * ОБРОБКА РЕЗУЛЬТАТУ ВІДПРАВКИ
  * ========================================================= */
 
 async function processMasterDeliveryResult(
@@ -164,40 +215,33 @@ async function processMasterDeliveryResult(
   result
 ) {
   /*
-   * Успішна доставка означає, що приватний
-   * чат із майстром доступний.
+   * Повідомлення успішно доставлено Telegram.
    */
   if (result?.ok) {
-    await setMasterBotStatus(
+    await markMasterAvailable(
       env,
-      chatId,
-      "available"
+      chatId
     );
 
     return result;
   }
 
   /*
-   * Відомі Telegram-помилки недоступності.
+   * Telegram підтвердив, що приватний чат
+   * з користувачем недоступний.
    */
-  if (isMasterTelegramUnavailable(result)) {
-    await setMasterBotStatus(
+  if (isBotUnavailable(result)) {
+    await markMasterInactive(
       env,
-      chatId,
-      "unavailable"
+      chatId
     );
   }
 
-  /*
-   * Інші помилки (мережа, Telegram API,
-   * неправильний payload тощо) статус майстра
-   * не змінюють.
-   */
   return result;
 }
 
 /* =========================================================
- * ПОВІДОМЛЕННЯ МАЙСТРУ
+ * SEND MESSAGE
  * ========================================================= */
 
 export async function sendToMaster(
@@ -232,7 +276,7 @@ export async function sendToMaster(
 }
 
 /* =========================================================
- * РЕДАГУВАННЯ ПОВІДОМЛЕННЯ МАЙСТРА
+ * EDIT MESSAGE
  * ========================================================= */
 
 export async function editMasterMessage(
@@ -265,7 +309,7 @@ export async function editMasterMessage(
 }
 
 /* =========================================================
- * ВИДАЛЕННЯ ПОВІДОМЛЕННЯ
+ * DELETE MESSAGE
  * ========================================================= */
 
 export async function deleteMasterMessage(
@@ -282,18 +326,10 @@ export async function deleteMasterMessage(
     }
   );
 
-  /*
-   * deleteMessage не використовуємо як доказ
-   * available, оскільки помилка може стосуватися
-   * самого повідомлення.
-   *
-   * Але явне блокування бота можемо зафіксувати.
-   */
-  if (isMasterTelegramUnavailable(result)) {
-    await setMasterBotStatus(
+  if (isBotUnavailable(result)) {
+    await markMasterInactive(
       env,
-      chatId,
-      "unavailable"
+      chatId
     );
   }
 
@@ -335,7 +371,7 @@ export async function getJobsBotInfo(env) {
 }
 
 /* =========================================================
- * ПОСТІЙНЕ НИЖНЄ МЕНЮ TELEGRAM
+ * ПОСТІЙНЕ НИЖНЄ МЕНЮ
  * ========================================================= */
 
 export async function setMasterMenu(
