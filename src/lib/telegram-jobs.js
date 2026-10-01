@@ -6,97 +6,54 @@ function apiUrl(env, method) {
 
 async function callJobsBot(env, method, payload = {}) {
   if (!env.JOBS_BOT_TOKEN) {
-    return {
-      ok: false,
-      description: "JOBS_BOT_TOKEN не встановлено",
-    };
+    return { ok: false, description: "JOBS_BOT_TOKEN не встановлено" };
   }
 
   try {
     const res = await fetch(apiUrl(env, method), {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-
     const data = await res.json();
-
-    if (!data.ok) {
-      console.error(
-        `Jobs bot ${method} failed:`,
-        data.description || data
-      );
-    }
-
+    if (!data.ok) console.error(`Jobs bot ${method} failed:`, data.description || data);
     return data;
   } catch (err) {
     console.error(`Jobs bot ${method} error:`, err);
-
-    return {
-      ok: false,
-      description: String(err?.message || err),
-    };
+    return { ok: false, description: String(err?.message || err) };
   }
 }
 
-export async function sendToMaster(
-  env,
-  chatId,
-  text,
-  inlineKeyboard = null
-) {
+export async function sendToMaster(env, chatId, text, inlineKeyboard = null) {
   const payload = {
     chat_id: chatId,
     text,
     disable_web_page_preview: true,
   };
-
   if (inlineKeyboard) {
-    payload.reply_markup = {
-      inline_keyboard: inlineKeyboard,
-    };
+    payload.reply_markup = { inline_keyboard: inlineKeyboard };
   }
-
   return callJobsBot(env, "sendMessage", payload);
 }
 
-export async function editMasterMessage(
-  env,
-  chatId,
-  messageId,
-  text,
-  inlineKeyboard = null
-) {
+export async function editMasterMessage(env, chatId, messageId, text, inlineKeyboard = null) {
   return callJobsBot(env, "editMessageText", {
     chat_id: chatId,
     message_id: messageId,
     text,
     disable_web_page_preview: true,
-    reply_markup: {
-      inline_keyboard: inlineKeyboard || [],
-    },
+    reply_markup: { inline_keyboard: inlineKeyboard || [] },
   });
 }
 
-export async function deleteMasterMessage(
-  env,
-  chatId,
-  messageId
-) {
+export async function deleteMasterMessage(env, chatId, messageId) {
   return callJobsBot(env, "deleteMessage", {
     chat_id: chatId,
     message_id: messageId,
   });
 }
 
-export async function answerJobsCallback(
-  env,
-  callbackQueryId,
-  text = "",
-  showAlert = false
-) {
+export async function answerJobsCallback(env, callbackQueryId, text = "", showAlert = false) {
   return callJobsBot(env, "answerCallbackQuery", {
     callback_query_id: callbackQueryId,
     text,
@@ -108,10 +65,7 @@ export async function getJobsBotInfo(env) {
   return callJobsBot(env, "getMe", {});
 }
 
-export async function checkMasterBotAvailability(
-  env,
-  telegramId
-) {
+export async function checkMasterBotAvailability(env, telegramId) {
   if (!telegramId) {
     return {
       ok: false,
@@ -130,10 +84,7 @@ export async function checkMasterBotAvailability(
   };
 }
 
-export async function activateMasterBot(
-  env,
-  telegramId
-) {
+export async function activateMasterBot(env, telegramId) {
   if (!telegramId) {
     return {
       ok: false,
@@ -149,19 +100,10 @@ export async function activateMasterBot(
 
 /*
  * Постійне нижнє меню Telegram.
- *
- * "➕ Передати" є Web App-кнопкою і відкриває
+ * "➕ Передати" є Web App-кнопкою і одразу відкриває
  * персональну форму сайту.
- *
- * ТИМЧАСОВА ДІАГНОСТИКА:
- * після встановлення меню бот надсилає окреме
- * повідомлення з URL, який реально отримала кнопка.
  */
-export async function setMasterMenu(
-  env,
-  chatId,
-  referralUrl = null
-) {
+export async function setMasterMenu(env, chatId, referralUrl = null) {
   if (!chatId) {
     return {
       ok: false,
@@ -172,74 +114,29 @@ export async function setMasterMenu(
   const transferButton = referralUrl
     ? {
         text: "➕ Передати",
-        web_app: {
-          url: referralUrl,
-        },
+        web_app: { url: referralUrl },
       }
     : {
         text: "➕ Передати",
       };
 
-  /*
-   * Telegram не дозволяє встановити Reply Keyboard
-   * без надсилання повідомлення.
-   *
-   * Використовуємо невидимий символ,
-   * щоб не показувати:
-   * "Меню SA-MASTER Jobs готове 👇"
-   */
-  const menuResult = await callJobsBot(
-    env,
-    "sendMessage",
-    {
-      chat_id: chatId,
-      text: "\u2063",
-      disable_web_page_preview: true,
-      reply_markup: {
-        keyboard: [
-          [
-            {
-              text: "🔧 Мої заявки",
-            },
-            transferButton,
-          ],
-          [
-            {
-              text: "❓ Допомога",
-            },
-          ],
+  return callJobsBot(env, "sendMessage", {
+    chat_id: chatId,
+    text: "Меню SA-MASTER Jobs готове 👇",
+    disable_web_page_preview: true,
+    reply_markup: {
+      keyboard: [
+        [
+          { text: "🔧 Мої заявки" },
+          transferButton,
         ],
-        resize_keyboard: true,
-        is_persistent: true,
-        input_field_placeholder: "Оберіть дію",
-      },
-    }
-  );
-
-  /*
-   * ==========================================
-   * ТИМЧАСОВА ДІАГНОСТИКА REFERRAL URL
-   * ==========================================
-   *
-   * Після /start у чаті з ботом з'явиться:
-   *
-   * 🔎 DEBUG referralUrl:
-   * https://sa-master.pro/?ref=...&request=1
-   *
-   * або побачимо, що referralUrl взагалі
-   * не передається.
-   */
-  await callJobsBot(
-    env,
-    "sendMessage",
-    {
-      chat_id: chatId,
-      text:
-        "🔎 DEBUG referralUrl:\n\n" +
-        (referralUrl || "❌ referralUrl НЕ ПЕРЕДАНО"),
-      disable_web_page_preview: true,
-    }
-  );
-
-  return menuResult;
+        [
+          { text: "❓ Допомога" },
+        ],
+      ],
+      resize_keyboard: true,
+      is_persistent: true,
+      input_field_placeholder: "Оберіть дію",
+    },
+  });
 }
