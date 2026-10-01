@@ -123,8 +123,15 @@ function buildHomeButtons() {
   ];
 }
 
-async function sendHome(env, chatId, master) {
-  await setMasterMenu(env, chatId);
+async function sendHome(
+  env,
+  chatId,
+  master
+) {
+  await setMasterMenu(
+    env,
+    chatId
+  );
 
   return sendToMaster(
     env,
@@ -132,21 +139,19 @@ async function sendHome(env, chatId, master) {
     [
       "🔧 SA-MASTER Jobs",
       "",
-      master?.first_name ? `Вітаємо, ${master.first_name}!` : "Вітаємо!",
+      master?.first_name
+        ? `Вітаємо, ${master.first_name}!`
+        : "Вітаємо!",
       "",
-      "Нові заявки автоматично з'являються прямо в цьому чаті.",
+      "Нові доступні заявки автоматично з’являються в цьому чаті.",
       "",
-      "🔧 Мої заявки — заявки, які ви вже взяли",
+      "Для керування використовуйте меню внизу:",
+      "🔧 Мої заявки — ваші активні заявки",
       "➕ Передати — передати заявку іншому майстру",
-      "❓ Допомога — коротка інструкція",
-      "",
-      "Оберіть дію:",
-    ].join("\n"),
-    buildHomeButtons()
+      "❓ Допомога — правила роботи з ботом",
+    ].join("\n")
   );
 }
-
-/* ========================= REFERRAL ========================= */
 
 async function getMasterReferralLink(env, telegramId) {
   const master = await getMasterByTelegramId(env, telegramId);
