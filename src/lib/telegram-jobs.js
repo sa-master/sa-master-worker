@@ -24,15 +24,25 @@ async function callJobsBot(env, method, payload = {}) {
   }
 }
 
-export async function sendToMaster(env, chatId, text, inlineKeyboard = null) {
+export async function sendToMaster(
+  env,
+  chatId,
+  text,
+  inlineKeyboard = null,
+  replyKeyboard = null
+) {
   const payload = {
     chat_id: chatId,
     text,
     disable_web_page_preview: true,
   };
-  if (inlineKeyboard) {
+
+  if (replyKeyboard) {
+    payload.reply_markup = replyKeyboard;
+  } else if (inlineKeyboard) {
     payload.reply_markup = { inline_keyboard: inlineKeyboard };
   }
+
   return callJobsBot(env, "sendMessage", payload);
 }
 
@@ -100,17 +110,13 @@ export async function activateMasterBot(env, telegramId) {
 
 /*
  * Постійне нижнє меню Telegram.
+ * Функція лише формує ReplyKeyboard і НЕ надсилає
+ * окремого повідомлення в чат.
+ *
  * "➕ Передати" є Web App-кнопкою і одразу відкриває
  * персональну форму сайту.
  */
-export async function setMasterMenu(env, chatId, referralUrl = null) {
-  if (!chatId) {
-    return {
-      ok: false,
-      description: "chatId не вказано",
-    };
-  }
-
+export function setMasterMenu(referralUrl = null) {
   const transferButton = referralUrl
     ? {
         text: "➕ Передати",
@@ -120,23 +126,18 @@ export async function setMasterMenu(env, chatId, referralUrl = null) {
         text: "➕ Передати",
       };
 
-  return callJobsBot(env, "sendMessage", {
-    chat_id: chatId,
-    text: "Меню SA-MASTER Jobs готове 👇",
-    disable_web_page_preview: true,
-    reply_markup: {
-      keyboard: [
-        [
-          { text: "🔧 Мої заявки" },
-          transferButton,
-        ],
-        [
-          { text: "❓ Допомога" },
-        ],
+  return {
+    keyboard: [
+      [
+        { text: "🔧 Мої заявки" },
+        transferButton,
       ],
-      resize_keyboard: true,
-      is_persistent: true,
-      input_field_placeholder: "Оберіть дію",
-    },
-  });
+      [
+        { text: "❓ Допомога" },
+      ],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+    input_field_placeholder: "Оберіть дію",
+  };
 }
