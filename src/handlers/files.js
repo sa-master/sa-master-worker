@@ -46,6 +46,8 @@ export async function handleUploadRequestProject(request, env, headers, params, 
   try { formData = await request.formData(); }
   catch { return error("Очікується multipart/form-data", headers, 400); }
   const file = formData.get("file");
+  const kindRaw = str(formData.get("kind"), { max: 20 }) || "project";
+  const kind = kindRaw === "photo" ? "photo" : "project";
   if (!file || typeof file === "string" || typeof file.arrayBuffer !== "function") {
     return error("Файл не переданий. Використай поле file.", headers, 400);
   }
@@ -54,24 +56,29 @@ export async function handleUploadRequestProject(request, env, headers, params, 
   if (!ALLOWED_MIME.has(fileType)) return error("Тип файлу не дозволений: " + fileType, headers, 415);
 
   const name = str(file.name, { max: 200 }) || "project";
-  const storageKey = `requests/${requestCode}/project/${Date.now()}-${sanitizeName(name)}`;
+  const storageKey = `requests/${requestCode}/${kind}/${Date.now()}-${sanitizeName(name)}`;
   const bytes = await file.arrayBuffer();
 
   await env.FILES.put(storageKey, bytes, { httpMetadata: { contentType: fileType } });
   try {
     const saved = await env.DB.prepare(`
       INSERT INTO request_files (request_id, name, file_type, storage_key, size, uploaded_by)
-      VALUES (?, ?, ?, ?, ?, 'client')
-    `).bind(req.id, name, fileType, storageKey, file.size || bytes.byteLength).run();
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).bind(req.id, name, fileType, storageKey, file.size || bytes.byteLength, kind === 'photo' ? 'master_photo' : 'request_project').run();
     if (!saved.meta?.last_row_id) throw new Error("Не вдалося записати файл у базу");
-    await env.DB.batch([
-      env.DB.prepare(`UPDATE requests SET project = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
-        .bind(`Файл: ${name}`, req.id),
+    const statements = [
       env.DB.prepare(`
         INSERT INTO events (object_id, request_id, event_type, content, author_type)
-        VALUES (NULL, ?, 'project_uploaded', ?, 'client')
-      `).bind(req.id, `Клієнт додав проєкт: ${name}`),
-    ]);
+        VALUES (NULL, ?, ?, ?, 'client')
+      `).bind(
+        req.id,
+        kind === 'photo' ? 'photo_uploaded' : 'project_uploaded',
+        kind === 'photo' ? `Додано фото об’єкта: ${name}` : `Додано файл проєкту: ${name}`
+      ),
+    ];
+    /* Статус "Є/Немає/Не знаю" вже записаний у requests.project формою.
+       Завантаження файла не повинно його перезаписувати. */
+    await env.DB.batch(statements);
   } catch (err) {
     try { await env.FILES.delete(storageKey); } catch (cleanupError) { console.error("R2 cleanup:", cleanupError); }
     console.error("Request project save failed:", err);
@@ -80,7 +87,9 @@ export async function handleUploadRequestProject(request, env, headers, params, 
 
   const telegram = await sendTelegramDocument(env, {
     name, fileType, bytes,
-    caption: `📎 Проєкт до заявки ${requestCode}`,
+    caption: kind === 'photo'
+      ? `📷 Фото об’єкта до заявки ${requestCode}`
+      : `📎 Проєкт до заявки ${requestCode}`,
   });
   if (!telegram.ok) console.error("Project Telegram send failed:", telegram.description || telegram);
 
