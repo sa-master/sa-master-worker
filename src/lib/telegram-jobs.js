@@ -157,3 +157,33 @@ export async function sendFileToJobsGroup(env, { name, fileType, bytes, caption 
     return { ok: false, description: String(err?.message || err) };
   }
 }
+
+
+/* Відправити вкладення заявки конкретному майстру. */
+export async function sendFileToMaster(env, chatId, { name, fileType, bytes, caption = "" }) {
+  if (!env.JOBS_BOT_TOKEN || !chatId) {
+    return { ok: false, description: "JOBS_BOT_TOKEN або chatId не встановлено" };
+  }
+
+  try {
+    const form = new FormData();
+    form.append("chat_id", String(chatId));
+    if (caption) form.append("caption", caption);
+    form.append(
+      "document",
+      new Blob([bytes], { type: fileType || "application/octet-stream" }),
+      name || "file"
+    );
+
+    const res = await fetch(`${TELEGRAM_API}/bot${env.JOBS_BOT_TOKEN}/sendDocument`, {
+      method: "POST",
+      body: form,
+    });
+    const data = await res.json();
+    if (!data.ok) console.error("Jobs bot sendDocument to master failed:", data.description || data);
+    return data;
+  } catch (err) {
+    console.error("Jobs bot sendDocument to master error:", err);
+    return { ok: false, description: String(err?.message || err) };
+  }
+}
