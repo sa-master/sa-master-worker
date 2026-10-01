@@ -183,6 +183,69 @@ async function sendMasterStatusMessage(
 }
 
 /* =========================================================
+ * ПРОДОВЖЕННЯ НЕЗАВЕРШЕНОЇ АНКЕТИ
+ * ========================================================= */
+
+async function sendNextDraftQuestion(env, chatId, app) {
+  if (!app.first_name) {
+    return sendToMaster(
+      env,
+      chatId,
+      "Як до вас звертатися? (Ваше ім'я)"
+    );
+  }
+
+  if (!app.phone) {
+    return sendToMaster(
+      env,
+      chatId,
+      "📞 Ваш телефон?"
+    );
+  }
+
+  if (!app.specializations) {
+    return sendToMaster(
+      env,
+      chatId,
+      [
+        "🛠 Яка ваша спеціалізація?",
+        "",
+        "Напишіть:",
+        "• сантехніка",
+        "• електрика",
+        "• універсал",
+      ].join("\n")
+    );
+  }
+
+  if (!app.city) {
+    return sendToMaster(
+      env,
+      chatId,
+      "🏙 Ваше місто? (Київ / інше)"
+    );
+  }
+
+  if (!app.experience) {
+    return sendToMaster(
+      env,
+      chatId,
+      "📆 Скільки років досвіду?"
+    );
+  }
+
+  if (!app.about) {
+    return sendToMaster(
+      env,
+      chatId,
+      "💬 Коротко про себе (1–2 речення):"
+    );
+  }
+
+  return null;
+}
+
+/* =========================================================
  * ПОЧАТОК РЕЄСТРАЦІЇ
  * ========================================================= */
 
@@ -246,56 +309,11 @@ export async function handleJoinStart(
       ].join("\n")
     );
 
-    if (
-      !existing.phone &&
-      (
-        !existing.first_name ||
-        existing.first_name === fromUser.first_name
-      )
-    ) {
-      await sendToMaster(
-        env,
-        chatId,
-        "Як до вас звертатися? (Ваше ім'я)"
-      );
-    } else if (!existing.phone) {
-      await sendToMaster(
-        env,
-        chatId,
-        "📞 Ваш телефон?"
-      );
-    } else if (!existing.specializations) {
-      await sendToMaster(
-        env,
-        chatId,
-        [
-          "🛠 Яка ваша спеціалізація?",
-          "",
-          "Напишіть:",
-          "• сантехніка",
-          "• електрика",
-          "• універсал",
-        ].join("\n")
-      );
-    } else if (!existing.city) {
-      await sendToMaster(
-        env,
-        chatId,
-        "🏙 Ваше місто? (Київ / інше)"
-      );
-    } else if (!existing.experience) {
-      await sendToMaster(
-        env,
-        chatId,
-        "📆 Скільки років досвіду?"
-      );
-    } else if (!existing.about) {
-      await sendToMaster(
-        env,
-        chatId,
-        "💬 Коротко про себе (1–2 речення):"
-      );
-    }
+    await sendNextDraftQuestion(
+      env,
+      chatId,
+      existing
+    );
 
     return json(
       { ok: true },
@@ -306,6 +324,10 @@ export async function handleJoinStart(
   /*
    * rejected/approved старої анкети не блокує нову реєстрацію,
    * якщо профілю masters уже немає.
+   *
+   * ВАЖЛИВО:
+   * first_name тут навмисно NULL.
+   * Telegram first_name не вважаємо відповіддю на перше питання анкети.
    */
   await env.DB.prepare(`
     INSERT INTO master_applications (
@@ -314,12 +336,11 @@ export async function handleJoinStart(
       first_name,
       status
     )
-    VALUES (?, ?, ?, 'draft')
+    VALUES (?, ?, NULL, 'draft')
   `)
     .bind(
       fromUser.id,
-      fromUser.username || null,
-      fromUser.first_name || null
+      fromUser.username || null
     )
     .run();
 
@@ -405,13 +426,7 @@ export async function handleJoinMessage(
    * ІМ'Я
    * ----------------------------------------------------- */
 
-  if (
-    !app.phone &&
-    (
-      !app.first_name ||
-      app.first_name === fromUser.first_name
-    )
-  ) {
+  if (!app.first_name) {
     const firstName =
       String(text || "").trim();
 
