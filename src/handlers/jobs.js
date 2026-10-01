@@ -115,14 +115,6 @@ async function getAssignedRequest(env, requestCode, masterId) {
 
 /* ========================= HOME ========================= */
 
-function buildHomeButtons() {
-  return [
-    [{ text: "🔧 Мої заявки", callback_data: "my_jobs" }],
-    [{ text: "➕ Передати заявку", callback_data: "submit_request" }],
-    [{ text: "❓ Допомога", callback_data: "jobs_help" }],
-  ];
-}
-
 async function sendHome(
   env,
   chatId,
