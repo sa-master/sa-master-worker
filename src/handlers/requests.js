@@ -18,12 +18,9 @@ import {
   formatRequestText,
 } from "../lib/telegram-buttons.js";
 import {
-  banMasterFromJobsGroup,
-  unbanMasterFromJobsGroup,
-  getJobsChatMember,
   sendToMaster,
 } from "../lib/telegram-jobs.js";
-import { publishRequestToJobsGroup } from "./jobs.js";
+import { publishRequestToJobs } from "./jobs.js";
 
 const CURRENT_YEAR = 2026;
 const ESTIMATE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -274,7 +271,7 @@ async function showRequestCard(
 
   if (!req.transferred_to_jobs) {
     buttons.push([{
-      text: "🤝 Передати в канал",
+      text: "🤝 Передати майстрам",
       callback_data: `transfer_to_jobs:${req.request_code}`,
     }]);
   }
@@ -390,18 +387,6 @@ async function showMasterCard(env, callbackId, masterId, chatId, messageId) {
     return;
   }
 
-  let tgStatus = "—";
-
-  try {
-    const member = await getJobsChatMember(env, master.telegram_id);
-
-    tgStatus = member?.ok
-      ? (member.result?.status || "—")
-      : `помилка: ${member?.description || "невідомо"}`;
-  } catch {
-    tgStatus = "помилка перевірки";
-  }
-
   const text = [
     "👤 МАЙСТЕР SA-MASTER Jobs",
     "",
@@ -412,7 +397,6 @@ async function showMasterCard(env, callbackId, masterId, chatId, messageId) {
     `🏙 ${master.cities || "—"}`,
     `🆔 Telegram: ${master.telegram_id}`,
     `📊 Статус: ${adminMasterStatusLabel(master.status)}`,
-    `👥 Telegram-група: ${tgStatus}`,
     "",
     `✅ Успішні заявки: ${master.good_deals_count || 0}`,
     `📵 Не відповіли: ${master.no_answer_count || 0}`,
@@ -462,18 +446,6 @@ async function blockMaster(env, callbackId, masterId) {
     return false;
   }
 
-  const ban = await banMasterFromJobsGroup(env, master.telegram_id);
-
-  if (!ban?.ok) {
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      `❌ Telegram: ${ban?.description || "не вдалося заблокувати"}`,
-      true
-    );
-    return false;
-  }
-
   try {
     await env.DB.prepare(`
       UPDATE masters
@@ -482,20 +454,12 @@ async function blockMaster(env, callbackId, masterId) {
     `).bind(master.id).run();
   } catch (err) {
     console.error("DB block master failed:", err);
-
-    try {
-      await unbanMasterFromJobsGroup(env, master.telegram_id);
-    } catch (rollbackErr) {
-      console.error("Rollback unban after DB error failed:", rollbackErr);
-    }
-
     await answerCallbackQuery(
       env,
       callbackId,
       "❌ Не вдалося зберегти блокування в D1",
       true
     );
-
     return false;
   }
 
@@ -507,7 +471,7 @@ async function blockMaster(env, callbackId, masterId) {
         "🚫 ДОСТУП ДО SA-MASTER Jobs ЗАБЛОКОВАНО",
         "",
         "Ваш профіль заблоковано адміністратором.",
-        "Доступ до групи заявок та отримання заявок вимкнено.",
+        "Отримання нових заявок вимкнено.",
         "",
         "Для відновлення доступу зверніться до адміністратора.",
       ].join("\n")
@@ -533,18 +497,6 @@ async function unblockMaster(env, callbackId, masterId) {
     return false;
   }
 
-  const unban = await unbanMasterFromJobsGroup(env, master.telegram_id);
-
-  if (!unban?.ok) {
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      `❌ Telegram: ${unban?.description || "не вдалося розблокувати"}`,
-      true
-    );
-    return false;
-  }
-
   try {
     await env.DB.prepare(`
       UPDATE masters
@@ -553,14 +505,12 @@ async function unblockMaster(env, callbackId, masterId) {
     `).bind(master.id).run();
   } catch (err) {
     console.error("DB unblock master failed:", err);
-
     await answerCallbackQuery(
       env,
       callbackId,
       "❌ Не вдалося змінити статус у D1",
       true
     );
-
     return false;
   }
 
@@ -572,7 +522,7 @@ async function unblockMaster(env, callbackId, masterId) {
         "✅ ДОСТУП ДО SA-MASTER Jobs ВІДНОВЛЕНО",
         "",
         "Ваш профіль знову активний.",
-        "Відкрийте бота /start.",
+        "Відкрийте бота та натисніть /start.",
       ].join("\n")
     );
   } catch (err) {
@@ -595,19 +545,6 @@ async function deleteMasterPermanently(
   if (!master) {
     await answerCallbackQuery(env, callbackId, "❌ Майстра не знайдено", true);
     return false;
-  }
-
-  try {
-    const ban = await banMasterFromJobsGroup(env, master.telegram_id);
-
-    if (!ban?.ok) {
-      console.error(
-        "Telegram cleanup before master delete failed:",
-        ban?.description || ban
-      );
-    }
-  } catch (err) {
-    console.error("Telegram cleanup before master delete failed:", err);
   }
 
   /*
@@ -991,7 +928,7 @@ export async function handleCreateRequest(request, env, headers) {
   );
 
   buttons.push([{
-    text: "🤝 Передати в канал",
+    text: "🤝 Передати майстрам",
     callback_data: `transfer_to_jobs:${requestCode}`,
   }]);
 
@@ -1913,7 +1850,7 @@ async function handleTelegramStatusUpdate(
 
   if (!req.transferred_to_jobs) {
     buttons.push([{
-      text: "🤝 Передати в канал",
+      text: "🤝 Передати майстрам",
       callback_data: `transfer_to_jobs:${req.request_code}`,
     }]);
   }
@@ -1937,7 +1874,7 @@ async function handleTelegramStatusUpdate(
 }
 
 /* =========================================================
- * TELEGRAM: передача заявки в Jobs
+ * TELEGRAM: передача заявки майстрам
  * ========================================================= */
 
 async function handleTransferToJobs(
@@ -1962,59 +1899,84 @@ async function handleTransferToJobs(
   }
 
   if (req.transferred_to_jobs) {
-    await answerCallbackQuery(env, cq.id, "⚠️ Уже передано в канал", true);
+    await answerCallbackQuery(env, cq.id, "⚠️ Уже передано майстрам", true);
     return json({ ok: true }, headers);
   }
 
-  const result = await publishRequestToJobsGroup(env, req);
+  const result = await publishRequestToJobs(env, req);
 
   if (!result.ok) {
-    console.error("Publish to jobs group failed:", result.description || result);
+    console.error("Publish to Jobs failed:", result.description || result);
+    await answerCallbackQuery(
+      env,
+      cq.id,
+      "❌ Не вдалося передати майстрам",
+      true
+    );
+    return json({ ok: true }, headers);
+  }
+
+  const recipients = Number(result.recipients || 0);
+  const delivered = Number(result.delivered || 0);
+  const failed = Number(result.failed || 0);
+
+  /*
+   * publishRequestToJobs ставить transferred_to_jobs = 1 до розсилки.
+   * Якщо не доставлено жодному майстру — повертаємо заявку у стан
+   * "не передано", щоб адмін міг повторити спробу.
+   */
+  if (delivered === 0) {
+    try {
+      await env.DB.prepare(`
+        UPDATE requests
+        SET
+          transferred_to_jobs = 0,
+          transferred_at = NULL,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND assigned_master_id IS NULL
+      `).bind(req.id).run();
+    } catch (err) {
+      console.error("Rollback failed Jobs delivery failed:", err);
+    }
+
+    const reason = recipients === 0
+      ? "Немає активних майстрів для отримання заявки."
+      : `Telegram не доставив заявку жодному майстру (${failed} помилок).`;
 
     await answerCallbackQuery(
       env,
       cq.id,
-      "❌ Не вдалося опублікувати",
+      `❌ ${reason}`,
       true
     );
 
     return json({ ok: true }, headers);
   }
 
-  /*
-   * publishRequestToJobsGroup уже ставить transferred_to_jobs = 1.
-   * Тут фіксуємо event і нормалізуємо transferred_at без дублювання логіки.
-   */
   try {
-    await env.DB.batch([
-      env.DB.prepare(`
-        UPDATE requests
-        SET
-          transferred_to_jobs = 1,
-          transferred_at = COALESCE(transferred_at, CURRENT_TIMESTAMP),
-          updated_at = CURRENT_TIMESTAMP
-        WHERE id = ?
-      `).bind(req.id),
-
-      env.DB.prepare(`
-        INSERT INTO events (
-          object_id,
-          request_id,
-          event_type,
-          content,
-          author_type
-        )
-        VALUES (
-          ?,
-          ?,
-          'transferred_to_jobs',
-          'Передано в канал майстрів',
-          'system'
-        )
-      `).bind(req.object_id || null, req.id),
-    ]);
+    await env.DB.prepare(`
+      INSERT INTO events (
+        object_id,
+        request_id,
+        event_type,
+        content,
+        author_type
+      )
+      VALUES (
+        ?,
+        ?,
+        'transferred_to_jobs',
+        ?,
+        'system'
+      )
+    `).bind(
+      req.object_id || null,
+      req.id,
+      `Передано майстрам: ${delivered} із ${recipients}`
+    ).run();
   } catch (err) {
-    console.error("Mark as transferred failed:", err);
+    console.error("Save transferred_to_jobs event failed:", err);
   }
 
   const updatedText = [
@@ -2025,12 +1987,13 @@ async function handleTransferToJobs(
     `🔧 ${req.type_label || req.type || "—"}`,
     `📍 ${req.location || "—"}`,
     `📊 Статус: ${statusLabel(req.status)}`,
-    "🤝 Передано в канал майстрів",
+    `🤝 Передано майстрам: ${delivered} із ${recipients}`,
+    failed > 0 ? `⚠️ Не доставлено: ${failed}` : null,
     `🕐 ${new Date().toLocaleString(
       "uk-UA",
       { timeZone: "Europe/Kyiv" }
     )}`,
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 
   const buttons = buildStatusButtons(
     req.request_code,
@@ -2056,7 +2019,11 @@ async function handleTransferToJobs(
   ]);
 
   await editMessageText(env, chatId, messageId, updatedText, buttons);
-  await answerCallbackQuery(env, cq.id, "✅ Передано в канал майстрів");
+  await answerCallbackQuery(
+    env,
+    cq.id,
+    `✅ Передано майстрам: ${delivered} із ${recipients}`
+  );
 
   return json({ ok: true }, headers);
 }
@@ -2105,41 +2072,78 @@ async function handleJobsReviewReturn(
     return json({ ok: true }, headers);
   }
 
-  try {
-    await env.DB.batch([
-      env.DB.prepare(`
+  /*
+   * Після client_declined у jobs.js transferred_to_jobs = 0.
+   * Тому publishRequestToJobs може коректно опублікувати заявку повторно
+   * та реально розіслати її активним майстрам.
+   */
+  const result = await publishRequestToJobs(env, req);
+
+  if (!result.ok) {
+    console.error("Admin return to Jobs delivery failed:", result.description || result);
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Не вдалося повернути заявку майстрам",
+      true
+    );
+    return json({ ok: true }, headers);
+  }
+
+  const recipients = Number(result.recipients || 0);
+  const delivered = Number(result.delivered || 0);
+  const failed = Number(result.failed || 0);
+
+  if (delivered === 0) {
+    try {
+      await env.DB.prepare(`
         UPDATE requests
         SET
-          transferred_to_jobs = 1,
-          transferred_at = COALESCE(transferred_at, CURRENT_TIMESTAMP),
-          assigned_master_id = NULL,
-          assigned_master_name = NULL,
-          assigned_at = NULL,
+          transferred_to_jobs = 0,
+          transferred_at = NULL,
           updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-      `).bind(req.id),
+          AND assigned_master_id IS NULL
+      `).bind(req.id).run();
+    } catch (err) {
+      console.error("Rollback failed returned Jobs delivery failed:", err);
+    }
 
-      env.DB.prepare(`
-        INSERT INTO events (
-          object_id,
-          request_id,
-          event_type,
-          content,
-          author_type
-        )
-        VALUES (
-          ?,
-          ?,
-          'admin_returned_to_jobs',
-          'Адміністратор повернув заявку майстрам',
-          'admin'
-        )
-      `).bind(req.object_id || null, req.id),
-    ]);
-  } catch (err) {
-    console.error("Admin return to Jobs failed:", err);
-    await answerCallbackQuery(env, callbackId, "❌ Помилка збереження", true);
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      recipients === 0
+        ? "❌ Немає активних майстрів"
+        : "❌ Заявку не доставлено жодному майстру",
+      true
+    );
+
     return json({ ok: true }, headers);
+  }
+
+  try {
+    await env.DB.prepare(`
+      INSERT INTO events (
+        object_id,
+        request_id,
+        event_type,
+        content,
+        author_type
+      )
+      VALUES (
+        ?,
+        ?,
+        'admin_returned_to_jobs',
+        ?,
+        'admin'
+      )
+    `).bind(
+      req.object_id || null,
+      req.id,
+      `Адміністратор повернув заявку майстрам: доставлено ${delivered} із ${recipients}`
+    ).run();
+  } catch (err) {
+    console.error("Admin return to Jobs event failed:", err);
   }
 
   await editMessageText(
@@ -2153,8 +2157,11 @@ async function handleJobsReviewReturn(
       `👤 ${req.name || "—"}`,
       `📞 ${req.phone || "—"}`,
       "",
+      `✅ Доставлено: ${delivered} із ${recipients}`,
+      failed > 0 ? `⚠️ Не доставлено: ${failed}` : null,
+      "",
       "Заявка знову доступна активним майстрам у SA-MASTER Jobs.",
-    ].join("\n"),
+    ].filter(Boolean).join("\n"),
     [[
       {
         text: "🏠 До заявки",
@@ -2163,7 +2170,11 @@ async function handleJobsReviewReturn(
     ]]
   );
 
-  await answerCallbackQuery(env, callbackId, "✅ Повернуто в Jobs");
+  await answerCallbackQuery(
+    env,
+    callbackId,
+    `✅ Доставлено: ${delivered} із ${recipients}`
+  );
   return json({ ok: true }, headers);
 }
 
