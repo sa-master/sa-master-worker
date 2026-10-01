@@ -106,7 +106,8 @@ async function getAssignedRequest(env, requestCode, masterId) {
 
 async function sendHome(env, chatId, master) {
   const referralLink = await getMasterReferralLink(env, master.telegram_id);
-  const menu = setMasterMenu(referralLink);
+
+  await setMasterMenu(env, chatId, referralLink);
 
   return sendToMaster(
     env,
@@ -117,9 +118,12 @@ async function sendHome(env, chatId, master) {
       master?.first_name ? `Вітаємо, ${master.first_name}!` : "Вітаємо!",
       "",
       "Нові доступні заявки автоматично з’являються в цьому чаті.",
-    ].join("\n"),
-    null,
-    menu
+      "",
+      "Для керування використовуйте меню внизу:",
+      "🔧 Мої заявки — ваші активні заявки",
+      "➕ Передати — передати заявку іншому майстру",
+      "❓ Допомога — правила роботи з ботом",
+    ].join("\n")
   );
 }
 
@@ -1230,7 +1234,8 @@ async function handleCooperationFailed(env, headers, requestCode, cq) {
 
   if (req.status !== "approved") {
     await answerJobsCallback(
-      env, cq.id,
+      env,
+      cq.id,
       req.status === "installation"
         ? "❌ Роботи вже розпочаті"
         : "❌ Ця дія зараз недоступна",
