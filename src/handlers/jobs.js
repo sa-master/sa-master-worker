@@ -107,11 +107,10 @@ async function getAssignedRequest(env, requestCode, masterId) {
 async function sendHome(env, chatId, master) {
   const referralLink = await getMasterReferralLink(env, master.telegram_id);
 
-  await setMasterMenu(env, chatId, referralLink);
-
-  return sendToMaster(
+  return setMasterMenu(
     env,
     chatId,
+    referralLink,
     [
       "🔧 SA-MASTER Jobs",
       "",
