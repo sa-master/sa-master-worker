@@ -12,12 +12,17 @@ import {
   editMessageText,
   answerCallbackQuery,
 } from "../lib/telegram.js";
-import { sendToMaster } from "../lib/telegram-jobs.js";
 import {
   buildStatusButtons,
   canChangeStatus,
   formatRequestText,
 } from "../lib/telegram-buttons.js";
+import {
+  banMasterFromJobsGroup,
+  unbanMasterFromJobsGroup,
+  getJobsChatMember,
+  sendToMaster,
+} from "../lib/telegram-jobs.js";
 import { publishRequestToJobsGroup } from "./jobs.js";
 
 const CURRENT_YEAR = 2026;
@@ -45,26 +50,6 @@ function adminRenderer(env, chatId = null, messageId = null) {
     sendMessageWithButtons(env, text, buttons);
 }
 
-async function safeAnswerCallback(
-  env,
-  callbackId,
-  text = "",
-  showAlert = false
-) {
-  if (!callbackId) return;
-
-  try {
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      text,
-      showAlert
-    );
-  } catch (err) {
-    console.error("answerCallbackQuery failed:", err);
-  }
-}
-
 async function deleteIncomingCommand(env, msg) {
   const chatId = msg?.chat?.id;
   const messageId = msg?.message_id;
@@ -85,7 +70,6 @@ async function deleteIncomingCommand(env, msg) {
     );
 
     const data = await res.json();
-
     if (!data.ok) {
       console.error(
         "Telegram deleteMessage failed:",
@@ -284,7 +268,7 @@ async function showRequestCard(
   `).bind(requestCode).first();
 
   if (!req) {
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       callbackId,
       "❌ Заявку не знайдено",
@@ -322,7 +306,7 @@ async function showRequestCard(
 
   if (!req.transferred_to_jobs) {
     buttons.push([{
-      text: "🤝 Передати в Jobs",
+      text: "🤝 Передати в канал",
       callback_data: `transfer_to_jobs:${req.request_code}`,
     }]);
   }
@@ -344,7 +328,7 @@ async function showRequestCard(
     buttons
   );
 
-  await safeAnswerCallback(env, callbackId, "");
+  await answerCallbackQuery(env, callbackId, "");
 }
 
 /* =========================================================
@@ -452,13 +436,28 @@ async function showMasterCard(
   const master = await getAdminMaster(env, masterId);
 
   if (!master) {
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       callbackId,
       "❌ Майстра не знайдено",
       true
     );
     return;
+  }
+
+  let tgStatus = "—";
+
+  try {
+    const member = await getJobsChatMember(
+      env,
+      master.telegram_id
+    );
+
+    tgStatus = member?.ok
+      ? (member.result?.status || "—")
+      : `помилка: ${member?.description || "невідомо"}`;
+  } catch {
+    tgStatus = "помилка перевірки";
   }
 
   const text = [
@@ -471,6 +470,7 @@ async function showMasterCard(
     `🏙 ${master.cities || "—"}`,
     `🆔 Telegram: ${master.telegram_id}`,
     `📊 Статус: ${adminMasterStatusLabel(master.status)}`,
+    `👥 Telegram-група: ${tgStatus}`,
     "",
     `✅ Успішні заявки: ${master.good_deals_count || 0}`,
     `📵 Не відповіли: ${master.no_answer_count || 0}`,
@@ -484,10 +484,7 @@ async function showMasterCard(
       text: "🚫 Заблокувати",
       callback_data: `master_block:${master.id}`,
     }]);
-  } else if (
-    master.status === "blocked" ||
-    master.status === "inactive"
-  ) {
+  } else if (master.status === "blocked") {
     buttons.push([{
       text: "✅ Розблокувати",
       callback_data: `master_unblock:${master.id}`,
@@ -511,14 +508,14 @@ async function showMasterCard(
     buttons
   );
 
-  await safeAnswerCallback(env, callbackId, "");
+  await answerCallbackQuery(env, callbackId, "");
 }
 
 async function blockMaster(env, callbackId, masterId) {
   const master = await getAdminMaster(env, masterId);
 
   if (!master) {
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       callbackId,
       "❌ Майстра не знайдено",
@@ -528,10 +525,25 @@ async function blockMaster(env, callbackId, masterId) {
   }
 
   if (master.status === "blocked") {
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       callbackId,
       "⚠️ Майстер уже заблокований",
+      true
+    );
+    return false;
+  }
+
+  const ban = await banMasterFromJobsGroup(
+    env,
+    master.telegram_id
+  );
+
+  if (!ban?.ok) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      `❌ Telegram: ${ban?.description || "не вдалося заблокувати"}`,
       true
     );
     return false;
@@ -548,7 +560,19 @@ async function blockMaster(env, callbackId, masterId) {
   } catch (err) {
     console.error("DB block master failed:", err);
 
-    await safeAnswerCallback(
+    try {
+      await unbanMasterFromJobsGroup(
+        env,
+        master.telegram_id
+      );
+    } catch (rollbackErr) {
+      console.error(
+        "Rollback unban after DB error failed:",
+        rollbackErr
+      );
+    }
+
+    await answerCallbackQuery(
       env,
       callbackId,
       "❌ Не вдалося зберегти блокування в D1",
@@ -566,7 +590,7 @@ async function blockMaster(env, callbackId, masterId) {
         "🚫 ДОСТУП ДО SA-MASTER Jobs ЗАБЛОКОВАНО",
         "",
         "Ваш профіль заблоковано адміністратором.",
-        "Доступ до заявок вимкнено.",
+        "Доступ до групи заявок та отримання заявок вимкнено.",
         "",
         "Для відновлення доступу зверніться до адміністратора.",
       ].join("\n")
@@ -578,7 +602,7 @@ async function blockMaster(env, callbackId, masterId) {
     );
   }
 
-  await safeAnswerCallback(
+  await answerCallbackQuery(
     env,
     callbackId,
     "🚫 Майстра заблоковано"
@@ -591,7 +615,7 @@ async function unblockMaster(env, callbackId, masterId) {
   const master = await getAdminMaster(env, masterId);
 
   if (!master) {
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       callbackId,
       "❌ Майстра не знайдено",
@@ -601,10 +625,25 @@ async function unblockMaster(env, callbackId, masterId) {
   }
 
   if (master.status === "active") {
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       callbackId,
       "⚠️ Майстер уже активний",
+      true
+    );
+    return false;
+  }
+
+  const unban = await unbanMasterFromJobsGroup(
+    env,
+    master.telegram_id
+  );
+
+  if (!unban?.ok) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      `❌ Telegram: ${unban?.description || "не вдалося розблокувати"}`,
       true
     );
     return false;
@@ -621,7 +660,7 @@ async function unblockMaster(env, callbackId, masterId) {
   } catch (err) {
     console.error("DB unblock master failed:", err);
 
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       callbackId,
       "❌ Не вдалося змінити статус у D1",
@@ -639,7 +678,7 @@ async function unblockMaster(env, callbackId, masterId) {
         "✅ ДОСТУП ДО SA-MASTER Jobs ВІДНОВЛЕНО",
         "",
         "Ваш профіль знову активний.",
-        "Відкрийте бота та натисніть /start.",
+        "Відкрийте бота /start та отримайте нове запрошення до групи заявок.",
       ].join("\n")
     );
   } catch (err) {
@@ -649,7 +688,7 @@ async function unblockMaster(env, callbackId, masterId) {
     );
   }
 
-  await safeAnswerCallback(
+  await answerCallbackQuery(
     env,
     callbackId,
     "✅ Майстра розблоковано"
@@ -668,7 +707,7 @@ async function deleteMasterPermanently(
   const master = await getAdminMaster(env, masterId);
 
   if (!master) {
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       callbackId,
       "❌ Майстра не знайдено",
@@ -677,13 +716,32 @@ async function deleteMasterPermanently(
     return false;
   }
 
+  try {
+    const ban = await banMasterFromJobsGroup(
+      env,
+      master.telegram_id
+    );
+
+    if (!ban?.ok) {
+      console.error(
+        "Telegram cleanup before master delete failed:",
+        ban?.description || ban
+      );
+    }
+  } catch (err) {
+    console.error(
+      "Telegram cleanup before master delete failed:",
+      err
+    );
+  }
+
   const cleanupSteps = [
     {
       name: "request_outcomes",
       statement: env.DB.prepare(`
         DELETE FROM request_outcomes
         WHERE master_id = ?
-      `).bind(master.id),
+      `).bind(master.telegram_id),
     },
     {
       name: "requests.source_master_id",
@@ -706,7 +764,7 @@ async function deleteMasterPermanently(
           assigned_at = NULL,
           updated_at = CURRENT_TIMESTAMP
         WHERE assigned_master_id = ?
-      `).bind(master.id),
+      `).bind(master.telegram_id),
     },
     {
       name: "events.author_id",
@@ -752,7 +810,7 @@ async function deleteMasterPermanently(
         err
       );
 
-      await safeAnswerCallback(
+      await answerCallbackQuery(
         env,
         callbackId,
         `❌ Помилка видалення: ${step.name}`,
@@ -782,7 +840,7 @@ async function deleteMasterPermanently(
     ]]
   );
 
-  await safeAnswerCallback(
+  await answerCallbackQuery(
     env,
     callbackId,
     "🗑 Майстра видалено назавжди"
@@ -1160,7 +1218,7 @@ export async function handleCreateRequest(
   );
 
   buttons.push([{
-    text: "🤝 Передати в Jobs",
+    text: "🤝 Передати в канал",
     callback_data:
       `transfer_to_jobs:${requestCode}`,
   }]);
@@ -1769,6 +1827,18 @@ export async function handleTelegramWebhook(
     );
   }
 
+  /* -------------------------------------------------------
+   * Звичайні повідомлення / команди.
+   *
+   * ВАЖЛИВО:
+   * /start    -> ТІЛЬКИ статистика.
+   * /requests -> ТІЛЬКИ список заявок.
+   * /masters  -> ТІЛЬКИ список майстрів.
+   *
+   * Немає admin_ui_state і немає автоматичного виклику
+   * sendAdminMenu() з /requests або /masters.
+   * ----------------------------------------------------- */
+
   if (update.message) {
     const msg = update.message;
 
@@ -1790,6 +1860,9 @@ export async function handleTelegramWebhook(
 
     if (adminCommand === "/start") {
       await deleteIncomingCommand(env, msg);
+
+      // На /start статистика є окремим тимчасовим екраном.
+      // Спочатку прибираємо попередню статистику, якщо вона відома.
       await removeStatsMessage(env, msg.chat?.id);
 
       const sent = await sendAdminMenu(env);
@@ -1810,7 +1883,10 @@ export async function handleTelegramWebhook(
 
     if (adminCommand === "/requests") {
       await deleteIncomingCommand(env, msg);
+
+      // При переході до заявок прибираємо екран статистики.
       await removeStatsMessage(env, msg.chat?.id);
+
       await sendRequestsMenu(env);
 
       return json(
@@ -1821,7 +1897,10 @@ export async function handleTelegramWebhook(
 
     if (adminCommand === "/masters") {
       await deleteIncomingCommand(env, msg);
+
+      // При переході до майстрів прибираємо екран статистики.
       await removeStatsMessage(env, msg.chat?.id);
+
       await sendMastersMenu(env);
 
       return json(
@@ -1836,6 +1915,10 @@ export async function handleTelegramWebhook(
     );
   }
 
+  /* -------------------------------------------------------
+   * Callback-и inline-кнопок
+   * ----------------------------------------------------- */
+
   if (!update.callback_query) {
     return json(
       { ok: true },
@@ -1849,7 +1932,7 @@ export async function handleTelegramWebhook(
     String(cq.from?.id) !==
     String(env.CHAT_ID)
   ) {
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       cq.id,
       "❌ Немає доступу",
@@ -1875,7 +1958,7 @@ export async function handleTelegramWebhook(
     new URL(request.url).origin;
 
   if (!canEditMessage(chatId, messageId)) {
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       cq.id,
       "❌ Не вдалося визначити повідомлення адмінки",
@@ -1895,7 +1978,7 @@ export async function handleTelegramWebhook(
       messageId
     );
 
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       cq.id,
       ""
@@ -1907,17 +1990,6 @@ export async function handleTelegramWebhook(
     );
   }
 
-  if (data === "admin_close") {
-    try {
-      await deleteTelegramMessage(env, chatId, messageId);
-    } catch (err) {
-      console.error("Admin close message failed:", err);
-    }
-
-    await safeAnswerCallback(env, cq.id, "");
-    return json({ ok: true }, headers);
-  }
-
   if (data === "requests_list") {
     await sendRequestsMenu(
       env,
@@ -1925,7 +1997,7 @@ export async function handleTelegramWebhook(
       messageId
     );
 
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       cq.id,
       ""
@@ -1962,7 +2034,7 @@ export async function handleTelegramWebhook(
       messageId
     );
 
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       cq.id,
       ""
@@ -2062,7 +2134,7 @@ export async function handleTelegramWebhook(
       );
 
     if (!master) {
-      await safeAnswerCallback(
+      await answerCallbackQuery(
         env,
         cq.id,
         "❌ Майстра не знайдено",
@@ -2111,7 +2183,7 @@ export async function handleTelegramWebhook(
       ]]
     );
 
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       cq.id,
       ""
@@ -2186,23 +2258,15 @@ export async function handleTelegramWebhook(
 
   if (data.startsWith("jobs_review_return:")) {
     return handleJobsReviewReturn(
-      env,
-      headers,
-      data.slice("jobs_review_return:".length),
-      cq.id,
-      chatId,
-      messageId
+      env, headers, data.slice("jobs_review_return:".length),
+      cq.id, chatId, messageId
     );
   }
 
   if (data.startsWith("jobs_review_close:")) {
     return handleJobsReviewClose(
-      env,
-      headers,
-      data.slice("jobs_review_close:".length),
-      cq.id,
-      chatId,
-      messageId
+      env, headers, data.slice("jobs_review_close:".length),
+      cq.id, chatId, messageId
     );
   }
 
@@ -2234,7 +2298,7 @@ export async function handleTelegramWebhook(
     );
   }
 
-  await safeAnswerCallback(
+  await answerCallbackQuery(
     env,
     cq.id,
     "❓ Невідома дія",
@@ -2267,7 +2331,7 @@ async function handleTelegramDetails(
   `).bind(requestCode).first();
 
   if (!req) {
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       callbackId,
       "❌ Заявку не знайдено",
@@ -2326,7 +2390,7 @@ async function handleTelegramDetails(
     ]]
   );
 
-  await safeAnswerCallback(
+  await answerCallbackQuery(
     env,
     callbackId,
     ""
@@ -2353,7 +2417,7 @@ async function handleTelegramStatusUpdate(
   workerOrigin
 ) {
   if (!isValidStatus(newStatus)) {
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       callbackId,
       "❌ Невідомий статус",
@@ -2380,7 +2444,7 @@ async function handleTelegramStatusUpdate(
   `).bind(requestCode).first();
 
   if (!current) {
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       callbackId,
       "❌ Заявку не знайдено",
@@ -2399,7 +2463,7 @@ async function handleTelegramStatusUpdate(
       newStatus
     )
   ) {
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       callbackId,
       `❌ Неможливо: статус «${statusLabel(current.status)}» → «${statusLabel(newStatus)}»`,
@@ -2461,7 +2525,7 @@ async function handleTelegramStatusUpdate(
       err
     );
 
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       callbackId,
       "❌ Помилка збереження",
@@ -2508,7 +2572,7 @@ async function handleTelegramStatusUpdate(
 
   if (!req.transferred_to_jobs) {
     buttons.push([{
-      text: "🤝 Передати в Jobs",
+      text: "🤝 Передати в канал",
       callback_data:
         `transfer_to_jobs:${req.request_code}`,
     }]);
@@ -2535,7 +2599,7 @@ async function handleTelegramStatusUpdate(
     buttons
   );
 
-  await safeAnswerCallback(
+  await answerCallbackQuery(
     env,
     callbackId,
     `✅ ${newLabel}`
@@ -2568,7 +2632,7 @@ async function handleTransferToJobs(
   `).bind(requestCode).first();
 
   if (!req) {
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       cq.id,
       "❌ Заявку не знайдено",
@@ -2582,10 +2646,10 @@ async function handleTransferToJobs(
   }
 
   if (req.transferred_to_jobs) {
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       cq.id,
-      "⚠️ Уже передано в Jobs",
+      "⚠️ Уже передано в канал",
       true
     );
 
@@ -2603,11 +2667,11 @@ async function handleTransferToJobs(
 
   if (!result.ok) {
     console.error(
-      "Publish to Jobs failed:",
+      "Publish to jobs group failed:",
       result.description || result
     );
 
-    await safeAnswerCallback(
+    await answerCallbackQuery(
       env,
       cq.id,
       "❌ Не вдалося опублікувати",
@@ -2621,48 +2685,52 @@ async function handleTransferToJobs(
   }
 
   try {
-    await env.DB.prepare(`
-      INSERT INTO events (
-        object_id,
-        request_id,
-        event_type,
-        content,
-        author_type
-      )
-      VALUES (
-        ?,
-        ?,
-        'transferred_to_jobs',
-        'Передано в SA-MASTER Jobs',
-        'system'
-      )
-    `).bind(
-      req.object_id || null,
-      req.id
-    ).run();
+    await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE requests
+        SET
+          transferred_to_jobs = 1,
+          transferred_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(req.id),
+
+      env.DB.prepare(`
+        INSERT INTO events (
+          object_id,
+          request_id,
+          event_type,
+          content,
+          author_type
+        )
+        VALUES (
+          ?,
+          ?,
+          'transferred_to_jobs',
+          'Передано в канал майстрів',
+          'system'
+        )
+      `).bind(
+        req.object_id || null,
+        req.id
+      ),
+    ]);
   } catch (err) {
     console.error(
-      "Save transferred_to_jobs event failed:",
+      "Mark as transferred failed:",
       err
     );
   }
 
-  const updatedReq = await env.DB.prepare(`
-    SELECT *
-    FROM requests
-    WHERE id = ?
-    LIMIT 1
-  `).bind(req.id).first();
-
   const updatedText = [
-    `🏠 ЗАЯВКА ${updatedReq.request_code}`,
+    `🏠 ЗАЯВКА ${req.request_code}`,
     "",
-    `👤 ${updatedReq.name || "—"}`,
-    `📞 ${updatedReq.phone || "—"}`,
-    `🔧 ${updatedReq.type_label || updatedReq.type || "—"}`,
-    `📍 ${updatedReq.location || "—"}`,
-    `📊 Статус: ${statusLabel(updatedReq.status)}`,
-    "🤝 Передано в SA-MASTER Jobs",
+    `👤 ${req.name || "—"}`,
+    `📞 ${req.phone || "—"}`,
+    `🔧 ${req.type_label || req.type || "—"}`,
+    `📍 ${req.location || "—"}`,
+    `📊 Статус: ${statusLabel(req.status)}`,
+    "🤝 Передано в канал майстрів",
     `🕐 ${new Date().toLocaleString(
       "uk-UA",
       { timeZone: "Europe/Kyiv" }
@@ -2670,11 +2738,11 @@ async function handleTransferToJobs(
   ].join("\n");
 
   const buttons = buildStatusButtons(
-    updatedReq.request_code,
-    updatedReq.status,
+    req.request_code,
+    req.status,
     calculatorUrl(
-      updatedReq.request_code,
-      updatedReq.estimate_token,
+      req.request_code,
+      req.estimate_token,
       workerOrigin,
       env
     )
@@ -2683,7 +2751,7 @@ async function handleTransferToJobs(
   buttons.push([{
     text: "ℹ️ Деталі",
     callback_data:
-      `details:${updatedReq.request_code}`,
+      `details:${req.request_code}`,
   }]);
 
   buttons.push([
@@ -2701,10 +2769,10 @@ async function handleTransferToJobs(
     buttons
   );
 
-  await safeAnswerCallback(
+  await answerCallbackQuery(
     env,
     cq.id,
-    "✅ Передано в SA-MASTER Jobs"
+    "✅ Передано в канал майстрів"
   );
 
   return json(
@@ -2713,58 +2781,28 @@ async function handleTransferToJobs(
   );
 }
 
+
 /* =========================================================
  * ADMIN: перевірка заявки після відмови клієнта
  * ========================================================= */
 
-async function handleJobsReviewReturn(
-  env,
-  headers,
-  requestCode,
-  callbackId,
-  chatId,
-  messageId
-) {
+async function handleJobsReviewReturn(env, headers, requestCode, callbackId, chatId, messageId) {
   const req = await env.DB.prepare(`
-    SELECT *
-    FROM requests
-    WHERE request_code = ?
-    LIMIT 1
+    SELECT * FROM requests WHERE request_code = ? LIMIT 1
   `).bind(requestCode).first();
 
   if (!req) {
-    await safeAnswerCallback(
-      env,
-      callbackId,
-      "❌ Заявку не знайдено",
-      true
-    );
-
+    await safeAnswerCallback(env, callbackId, "❌ Заявку не знайдено", true);
     return json({ ok: true }, headers);
   }
 
   if (req.assigned_master_id) {
-    await safeAnswerCallback(
-      env,
-      callbackId,
-      "❌ Заявка вже закріплена за майстром",
-      true
-    );
-
+    await safeAnswerCallback(env, callbackId, "❌ Заявка вже закріплена за майстром", true);
     return json({ ok: true }, headers);
   }
 
-  if (
-    ["installation", "completed", "cancelled"]
-      .includes(req.status)
-  ) {
-    await safeAnswerCallback(
-      env,
-      callbackId,
-      "❌ Заявку вже закрито або роботи розпочато",
-      true
-    );
-
+  if (["installation", "completed", "cancelled"].includes(req.status)) {
+    await safeAnswerCallback(env, callbackId, "❌ Заявку вже закрито або роботи розпочато", true);
     return json({ ok: true }, headers);
   }
 
@@ -2772,124 +2810,51 @@ async function handleJobsReviewReturn(
     await env.DB.batch([
       env.DB.prepare(`
         UPDATE requests
-        SET
-          transferred_to_jobs = 1,
-          transferred_at = COALESCE(
-            transferred_at,
-            CURRENT_TIMESTAMP
-          ),
-          assigned_master_id = NULL,
-          assigned_master_name = NULL,
-          assigned_at = NULL,
-          updated_at = CURRENT_TIMESTAMP
+        SET transferred_to_jobs = 1,
+            transferred_at = COALESCE(transferred_at, CURRENT_TIMESTAMP),
+            assigned_master_id = NULL,
+            assigned_master_name = NULL,
+            assigned_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `).bind(req.id),
-
       env.DB.prepare(`
-        INSERT INTO events (
-          object_id,
-          request_id,
-          event_type,
-          content,
-          author_type
-        )
-        VALUES (
-          ?,
-          ?,
-          'admin_returned_to_jobs',
-          'Адміністратор повернув заявку майстрам',
-          'admin'
-        )
-      `).bind(
-        req.object_id || null,
-        req.id
-      ),
+        INSERT INTO events (object_id, request_id, event_type, content, author_type)
+        VALUES (?, ?, 'admin_returned_to_jobs', 'Адміністратор повернув заявку майстрам', 'admin')
+      `).bind(req.object_id || null, req.id),
     ]);
   } catch (err) {
-    console.error(
-      "Admin return to Jobs failed:",
-      err
-    );
-
-    await safeAnswerCallback(
-      env,
-      callbackId,
-      "❌ Помилка збереження",
-      true
-    );
-
+    console.error("Admin return to Jobs failed:", err);
+    await safeAnswerCallback(env, callbackId, "❌ Помилка збереження", true);
     return json({ ok: true }, headers);
   }
 
-  await editMessageText(
-    env,
-    chatId,
-    messageId,
-    [
-      "↩️ ЗАЯВКУ ПОВЕРНУТО МАЙСТРАМ",
-      "",
-      `🆔 ${req.request_code}`,
-      `👤 ${req.name || "—"}`,
-      `📞 ${req.phone || "—"}`,
-      "",
-      "Заявка знову доступна активним майстрам у SA-MASTER Jobs.",
-    ].join("\n"),
-    [[
-      {
-        text: "🏠 До заявки",
-        callback_data:
-          `request_open:${req.request_code}`,
-      },
-      {
-        text: "❌ Закрити",
-        callback_data: "admin_close",
-      },
-    ]]
-  );
+  await editMessageText(env, chatId, messageId, [
+    "↩️ ЗАЯВКУ ПОВЕРНУТО МАЙСТРАМ", "",
+    `🆔 ${req.request_code}`, `👤 ${req.name || "—"}`, `📞 ${req.phone || "—"}`, "",
+    "Заявка знову доступна активним майстрам у SA-MASTER Jobs."
+  ].join("\
+"), [[
+    { text: "🏠 До заявки", callback_data: `request_open:${req.request_code}` },
+    { text: "❌ Закрити", callback_data: "admin_close" },
+  ]]);
 
-  await safeAnswerCallback(
-    env,
-    callbackId,
-    "✅ Повернуто в Jobs"
-  );
-
+  await safeAnswerCallback(env, callbackId, "✅ Повернуто в Jobs");
   return json({ ok: true }, headers);
 }
 
-async function handleJobsReviewClose(
-  env,
-  headers,
-  requestCode,
-  callbackId,
-  chatId,
-  messageId
-) {
+async function handleJobsReviewClose(env, headers, requestCode, callbackId, chatId, messageId) {
   const req = await env.DB.prepare(`
-    SELECT *
-    FROM requests
-    WHERE request_code = ?
-    LIMIT 1
+    SELECT * FROM requests WHERE request_code = ? LIMIT 1
   `).bind(requestCode).first();
 
   if (!req) {
-    await safeAnswerCallback(
-      env,
-      callbackId,
-      "❌ Заявку не знайдено",
-      true
-    );
-
+    await safeAnswerCallback(env, callbackId, "❌ Заявку не знайдено", true);
     return json({ ok: true }, headers);
   }
 
   if (req.status === "completed") {
-    await safeAnswerCallback(
-      env,
-      callbackId,
-      "❌ Завершену заявку не можна скасувати",
-      true
-    );
-
+    await safeAnswerCallback(env, callbackId, "❌ Завершену заявку не можна скасувати", true);
     return json({ ok: true }, headers);
   }
 
@@ -2897,83 +2862,31 @@ async function handleJobsReviewClose(
     await env.DB.batch([
       env.DB.prepare(`
         UPDATE requests
-        SET
-          status = 'cancelled',
-          transferred_to_jobs = 0,
-          assigned_master_id = NULL,
-          assigned_master_name = NULL,
-          assigned_at = NULL,
-          updated_at = CURRENT_TIMESTAMP
+        SET status = 'cancelled', transferred_to_jobs = 0,
+            assigned_master_id = NULL, assigned_master_name = NULL, assigned_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
       `).bind(req.id),
-
       env.DB.prepare(`
-        INSERT INTO events (
-          object_id,
-          request_id,
-          event_type,
-          content,
-          author_type
-        )
-        VALUES (
-          ?,
-          ?,
-          'admin_closed_jobs_review',
-          'Адміністратор закрив заявку після перевірки',
-          'admin'
-        )
-      `).bind(
-        req.object_id || null,
-        req.id
-      ),
+        INSERT INTO events (object_id, request_id, event_type, content, author_type)
+        VALUES (?, ?, 'admin_closed_jobs_review', 'Адміністратор закрив заявку після перевірки', 'admin')
+      `).bind(req.object_id || null, req.id),
     ]);
   } catch (err) {
-    console.error(
-      "Admin close Jobs review failed:",
-      err
-    );
-
-    await safeAnswerCallback(
-      env,
-      callbackId,
-      "❌ Помилка збереження",
-      true
-    );
-
+    console.error("Admin close Jobs review failed:", err);
+    await safeAnswerCallback(env, callbackId, "❌ Помилка збереження", true);
     return json({ ok: true }, headers);
   }
 
-  await editMessageText(
-    env,
-    chatId,
-    messageId,
-    [
-      "❌ ЗАЯВКУ ЗАКРИТО",
-      "",
-      `🆔 ${req.request_code}`,
-      `👤 ${req.name || "—"}`,
-      "",
-      "Статус: Скасовано.",
-      "Заявка більше не доступна майстрам.",
-    ].join("\n"),
-    [[
-      {
-        text: "🏠 До заявки",
-        callback_data:
-          `request_open:${req.request_code}`,
-      },
-      {
-        text: "❌ Закрити",
-        callback_data: "admin_close",
-      },
-    ]]
-  );
+  await editMessageText(env, chatId, messageId, [
+    "❌ ЗАЯВКУ ЗАКРИТО", "", `🆔 ${req.request_code}`, `👤 ${req.name || "—"}`, "",
+    "Статус: Скасовано.", "Заявка більше не доступна майстрам."
+  ].join("\
+"), [[
+    { text: "🏠 До заявки", callback_data: `request_open:${req.request_code}` },
+    { text: "❌ Закрити", callback_data: "admin_close" },
+  ]]);
 
-  await safeAnswerCallback(
-    env,
-    callbackId,
-    "❌ Заявку закрито"
-  );
-
+  await safeAnswerCallback(env, callbackId, "❌ Заявку закрито");
   return json({ ok: true }, headers);
 }
