@@ -48,6 +48,103 @@ function requireTelegramWebhookSecret(request, env, secretName, headers) {
   return null;
 }
 
+/*
+ * TEMPORARY ADMIN ENDPOINT.
+ * Registers both Telegram webhooks with their secret_token values.
+ * Remove this route and handler after successful setup.
+ */
+async function handleSetupWebhooks(request, env, headers) {
+  const required = [
+    "TELEGRAM_BOT_TOKEN",
+    "JOBS_BOT_TOKEN",
+    "TELEGRAM_WEBHOOK_SECRET",
+    "JOBS_WEBHOOK_SECRET",
+  ];
+
+  const missing = required.filter((name) => !env?.[name]);
+  if (missing.length) {
+    return new Response(
+      JSON.stringify({
+        ok: false,
+        error: "Missing required secrets",
+        missing,
+      }),
+      {
+        status: 503,
+        headers: {
+          ...headers,
+          "Content-Type": "application/json; charset=utf-8",
+        },
+      }
+    );
+  }
+
+  const origin = new URL(request.url).origin;
+
+  const configs = [
+    {
+      bot: "main",
+      token: env.TELEGRAM_BOT_TOKEN,
+      webhookUrl: `${origin}/telegram-webhook`,
+      secretToken: env.TELEGRAM_WEBHOOK_SECRET,
+    },
+    {
+      bot: "jobs",
+      token: env.JOBS_BOT_TOKEN,
+      webhookUrl: `${origin}/jobs-webhook`,
+      secretToken: env.JOBS_WEBHOOK_SECRET,
+    },
+  ];
+
+  const results = [];
+
+  for (const config of configs) {
+    try {
+      const response = await fetch(
+        `https://api.telegram.org/bot${config.token}/setWebhook`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            url: config.webhookUrl,
+            secret_token: config.secretToken,
+            drop_pending_updates: false,
+          }),
+        }
+      );
+
+      const data = await response.json();
+
+      results.push({
+        bot: config.bot,
+        ok: Boolean(data?.ok),
+        description: data?.description || null,
+      });
+    } catch (err) {
+      results.push({
+        bot: config.bot,
+        ok: false,
+        description: err?.message || String(err),
+      });
+    }
+  }
+
+  const ok = results.every((item) => item.ok);
+
+  return new Response(
+    JSON.stringify({ ok, results }, null, 2),
+    {
+      status: ok ? 200 : 502,
+      headers: {
+        ...headers,
+        "Content-Type": "application/json; charset=utf-8",
+      },
+    }
+  );
+}
+
 const PUBLIC_ROUTES = [
   ["GET",  /^\/$/,                            handleHealth,                { auth: false }],
   ["POST", /^\/$/,                            handleCreateRequest,         { auth: false }],
@@ -58,6 +155,7 @@ const PUBLIC_ROUTES = [
 ];
 
 const ADMIN_ROUTES = [
+  ["POST",  /^\/admin\/setup-webhooks$/,         handleSetupWebhooks,  { auth: true }],
   ["GET",   /^\/requests$/,                     handleListRequests,   { auth: true }],
   ["GET",   /^\/request\/([^/]+)$/,             handleGetRequest,     { auth: true }],
   ["POST",  /^\/request\/([^/]+)\/status$/,     handleUpdateStatus,   { auth: true }],
