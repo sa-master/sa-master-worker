@@ -15,87 +15,45 @@ async function callJobsBot(env, method, payload = {}) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-
     const data = await res.json();
-
-    if (!data.ok) {
-      console.error(
-        `Jobs bot ${method} failed:`,
-        data.description || data
-      );
-    }
-
+    if (!data.ok) console.error(`Jobs bot ${method} failed:`, data.description || data);
     return data;
   } catch (err) {
     console.error(`Jobs bot ${method} error:`, err);
-
-    return {
-      ok: false,
-      description: String(err?.message || err),
-    };
+    return { ok: false, description: String(err?.message || err) };
   }
 }
 
-/* =========================================================
- * MASTER MESSAGES
- * ========================================================= */
-
-export async function sendToMaster(
-  env,
-  chatId,
-  text,
-  inlineKeyboard = null
-) {
+export async function sendToMaster(env, chatId, text, inlineKeyboard = null) {
   const payload = {
     chat_id: chatId,
     text,
     disable_web_page_preview: true,
   };
-
   if (inlineKeyboard) {
-    payload.reply_markup = {
-      inline_keyboard: inlineKeyboard,
-    };
+    payload.reply_markup = { inline_keyboard: inlineKeyboard };
   }
-
   return callJobsBot(env, "sendMessage", payload);
 }
 
-export async function editMasterMessage(
-  env,
-  chatId,
-  messageId,
-  text,
-  inlineKeyboard = null
-) {
+export async function editMasterMessage(env, chatId, messageId, text, inlineKeyboard = null) {
   return callJobsBot(env, "editMessageText", {
     chat_id: chatId,
     message_id: messageId,
     text,
     disable_web_page_preview: true,
-    reply_markup: {
-      inline_keyboard: inlineKeyboard || [],
-    },
+    reply_markup: { inline_keyboard: inlineKeyboard || [] },
   });
 }
 
-export async function deleteMasterMessage(
-  env,
-  chatId,
-  messageId
-) {
+export async function deleteMasterMessage(env, chatId, messageId) {
   return callJobsBot(env, "deleteMessage", {
     chat_id: chatId,
     message_id: messageId,
   });
 }
 
-export async function answerJobsCallback(
-  env,
-  callbackQueryId,
-  text = "",
-  showAlert = false
-) {
+export async function answerJobsCallback(env, callbackQueryId, text = "", showAlert = false) {
   return callJobsBot(env, "answerCallbackQuery", {
     callback_query_id: callbackQueryId,
     text,
@@ -107,20 +65,7 @@ export async function getJobsBotInfo(env) {
   return callJobsBot(env, "getMe", {});
 }
 
-/* =========================================================
- * MASTER BOT AVAILABILITY
- * ========================================================= */
-
-/*
- * Перевіряє, чи може Jobs-бот написати майстру.
- *
- * Використовується requests.js перед надсиланням/передачею
- * заявки майстру.
- */
-export async function checkMasterBotAvailability(
-  env,
-  telegramId
-) {
+export async function checkMasterBotAvailability(env, telegramId) {
   if (!telegramId) {
     return {
       ok: false,
@@ -139,17 +84,7 @@ export async function checkMasterBotAvailability(
   };
 }
 
-/*
- * Викликається jobs.js при повідомленні або callback від майстра.
- *
- * Сам факт отримання update від користувача означає, що він
- * відкрив/активував Jobs-бота. Функція залишена окремим export,
- * оскільки її використовує поточна логіка handlers/jobs.js.
- */
-export async function activateMasterBot(
-  env,
-  telegramId
-) {
+export async function activateMasterBot(env, telegramId) {
   if (!telegramId) {
     return {
       ok: false,
@@ -163,30 +98,12 @@ export async function activateMasterBot(
   };
 }
 
-/* =========================================================
- * PERMANENT TELEGRAM CHAT MENU
- * ========================================================= */
-
 /*
- * Це НЕ inline-кнопки під повідомленням.
- *
- * Це ReplyKeyboardMarkup — постійне меню внизу чату Telegram,
- * на місці звичайної клавіатури.
- *
- * Меню:
- *
- * ┌─────────────────┬──────────────┐
- * │ 🔧 Мої заявки   │ ➕ Передати  │
- * ├─────────────────┴──────────────┤
- * │ ❓ Допомога                    │
- * └────────────────────────────────┘
- *
- * Кнопки "📋 Заявки" тут немає.
+ * Постійне нижнє меню Telegram.
+ * "➕ Передати" є Web App-кнопкою і одразу відкриває
+ * персональну форму сайту.
  */
-export async function setMasterMenu(
-  env,
-  chatId
-) {
+export async function setMasterMenu(env, chatId, referralUrl = null) {
   if (!chatId) {
     return {
       ok: false,
@@ -194,44 +111,31 @@ export async function setMasterMenu(
     };
   }
 
+  const transferButton = referralUrl
+    ? {
+        text: "➕ Передати",
+        web_app: { url: referralUrl },
+      }
+    : {
+        text: "➕ Передати",
+      };
+
   return callJobsBot(env, "sendMessage", {
     chat_id: chatId,
-
-    /*
-     * Telegram API вимагає текст у sendMessage.
-     * Це службове коротке повідомлення з'явиться лише тоді,
-     * коли setMasterMenu() викликається (зараз — при /start
-     * через sendHome()).
-     */
     text: "Меню SA-MASTER Jobs готове 👇",
-
     disable_web_page_preview: true,
-
     reply_markup: {
       keyboard: [
         [
-          {
-            text: "🔧 Мої заявки",
-          },
-          {
-            text: "➕ Передати",
-          },
+          { text: "🔧 Мої заявки" },
+          transferButton,
         ],
         [
-          {
-            text: "❓ Допомога",
-          },
+          { text: "❓ Допомога" },
         ],
       ],
-
       resize_keyboard: true,
-
-      /*
-       * Не використовуємо one_time_keyboard.
-       * Клавіатура має залишатися постійним меню чату.
-       */
       is_persistent: true,
-
       input_field_placeholder: "Оберіть дію",
     },
   });
