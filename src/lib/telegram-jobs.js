@@ -5,7 +5,10 @@ function apiUrl(env, method) {
 }
 
 async function callJobsBot(env, method, payload = {}) {
-  if (!env.JOBS_BOT_TOKEN) return { ok: false, description: "JOBS_BOT_TOKEN не встановлено" };
+  if (!env.JOBS_BOT_TOKEN) {
+    return { ok: false, description: "JOBS_BOT_TOKEN не встановлено" };
+  }
+
   try {
     const res = await fetch(apiUrl(env, method), {
       method: "POST",
@@ -21,102 +24,33 @@ async function callJobsBot(env, method, payload = {}) {
   }
 }
 
-function isBotUnavailable(result) {
-  if (!result || result.ok) return false;
-  const errorCode = Number(result.error_code || 0);
-  const description = String(result.description || "").toLowerCase();
-  if (errorCode !== 403) return false;
-  return (
-    description.includes("bot was blocked by the user") ||
-    description.includes("user is deactivated") ||
-    description.includes("bot can't initiate conversation with a user") ||
-    description.includes("forbidden")
-  );
-}
-
-async function markMasterInactive(env, telegramId) {
-  if (!env?.DB || telegramId == null) return;
-  try {
-    const result = await env.DB.prepare(`
-      UPDATE masters
-      SET status = 'inactive',
-          bot_status = 'unavailable',
-          bot_status_checked_at = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE telegram_id = ? AND status = 'active'
-    `).bind(telegramId).run();
-    if (result.meta?.changes) console.log(`Master ${telegramId}: active -> inactive`);
-  } catch (err) {
-    console.error(`Failed to mark master ${telegramId} inactive:`, err);
-  }
-}
-
-async function markMasterAvailable(env, telegramId) {
-  if (!env?.DB || telegramId == null) return;
-  try {
-    await env.DB.prepare(`
-      UPDATE masters
-      SET bot_status = 'available',
-          bot_status_checked_at = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE telegram_id = ? AND status != 'blocked'
-    `).bind(telegramId).run();
-  } catch (err) {
-    console.error(`Failed to mark master ${telegramId} available:`, err);
-  }
-}
-
-export async function activateMasterBot(env, telegramId) {
-  if (!env?.DB || telegramId == null) return null;
-  try {
-    return await env.DB.prepare(`
-      UPDATE masters
-      SET status = CASE WHEN status = 'inactive' THEN 'active' ELSE status END,
-          bot_status = 'available',
-          bot_status_checked_at = CURRENT_TIMESTAMP,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE telegram_id = ? AND status != 'blocked'
-    `).bind(telegramId).run();
-  } catch (err) {
-    console.error(`Failed to activate master ${telegramId}:`, err);
-    return null;
-  }
-}
-
-async function processMasterDeliveryResult(env, chatId, result) {
-  if (result?.ok) {
-    await markMasterAvailable(env, chatId);
-    return result;
-  }
-  if (isBotUnavailable(result)) await markMasterInactive(env, chatId);
-  return result;
-}
-
 export async function sendToMaster(env, chatId, text, inlineKeyboard = null) {
-  const payload = { chat_id: chatId, text, disable_web_page_preview: true };
-  if (inlineKeyboard) payload.reply_markup = { inline_keyboard: inlineKeyboard };
-  const result = await callJobsBot(env, "sendMessage", payload);
-  return processMasterDeliveryResult(env, chatId, result);
+  const payload = {
+    chat_id: chatId,
+    text,
+    disable_web_page_preview: true,
+  };
+  if (inlineKeyboard) {
+    payload.reply_markup = { inline_keyboard: inlineKeyboard };
+  }
+  return callJobsBot(env, "sendMessage", payload);
 }
 
 export async function editMasterMessage(env, chatId, messageId, text, inlineKeyboard = null) {
-  const result = await callJobsBot(env, "editMessageText", {
+  return callJobsBot(env, "editMessageText", {
     chat_id: chatId,
     message_id: messageId,
     text,
     disable_web_page_preview: true,
     reply_markup: { inline_keyboard: inlineKeyboard || [] },
   });
-  return processMasterDeliveryResult(env, chatId, result);
 }
 
 export async function deleteMasterMessage(env, chatId, messageId) {
-  const result = await callJobsBot(env, "deleteMessage", {
+  return callJobsBot(env, "deleteMessage", {
     chat_id: chatId,
     message_id: messageId,
   });
-  if (isBotUnavailable(result)) await markMasterInactive(env, chatId);
-  return result;
 }
 
 export async function answerJobsCallback(env, callbackQueryId, text = "", showAlert = false) {
@@ -131,16 +65,13 @@ export async function getJobsBotInfo(env) {
   return callJobsBot(env, "getMe", {});
 }
 
-/* =========================================================
- * ПОСТІЙНЕ НИЖНЄ МЕНЮ
- *
- * Нові заявки надходитимуть безпосередньо в чат.
- * /jobs залишається резервною командою для перегляду
- * актуальних вільних заявок.
- * ========================================================= */
-
+/*
+ * Постійне нижнє меню Telegram.
+ * Це ReplyKeyboard, тому воно залишається доступним майстру
+ * незалежно від того, яке повідомлення зараз відкрите.
+ */
 export async function setMasterMenu(env, chatId) {
-  const result = await callJobsBot(env, "sendMessage", {
+  return callJobsBot(env, "sendMessage", {
     chat_id: chatId,
     text: "Меню SA-MASTER Jobs готове 👇",
     disable_web_page_preview: true,
@@ -159,6 +90,4 @@ export async function setMasterMenu(env, chatId) {
       input_field_placeholder: "Оберіть дію",
     },
   });
-
-  return processMasterDeliveryResult(env, chatId, result);
 }
