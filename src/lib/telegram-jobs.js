@@ -49,75 +49,150 @@ async function callJobsBot(env, method, payload = {}) {
 }
 
 /* =========================================================
- * СТАН ДОСТУПУ МАЙСТРА ДО БОТА
+ * TELEGRAM-ДОСТУПНІСТЬ МАЙСТРА
  *
- * active   = майстер активний, бот доступний
- * inactive = майстер заблокував бота
- * blocked  = майстра заблокував адміністратор
+ * masters.status:
+ *   active   = активний у SA-MASTER Jobs
+ *   inactive = профіль деактивований адміністратором
+ *   blocked  = профіль заблокований адміністратором
+ *
+ * masters.bot_status:
+ *   unknown     = ще не перевірено
+ *   available   = бот може зв'язатися з майстром
+ *   unavailable = Telegram не дозволяє зв'язатися
+ *
+ * ВАЖЛИВО:
+ * Telegram-доступність НЕ змінює masters.status.
  * ========================================================= */
 
-function isBotBlockedByUser(result) {
-  if (!result || result.ok) return false;
+function isMasterTelegramUnavailable(result) {
+  if (!result || result.ok) {
+    return false;
+  }
 
-  const errorCode = Number(result.error_code || 0);
+  const errorCode = Number(
+    result.error_code || 0
+  );
+
   const description = String(
     result.description || ""
   ).toLowerCase();
 
   /*
-   * Не кожен 403 означає саме блокування користувачем.
-   * Міняємо статус лише для відомих відповідей Telegram,
-   * які означають, що приватний чат з ботом недоступний.
+   * Фіксуємо unavailable лише для відповідей,
+   * які дійсно означають недоступність приватного
+   * чату з користувачем.
    */
-  return (
-    errorCode === 403 &&
-    (
-      description.includes("bot was blocked by the user") ||
-      description.includes("user is deactivated")
-    )
-  );
+  if (errorCode === 403) {
+    return (
+      description.includes(
+        "bot was blocked by the user"
+      ) ||
+      description.includes(
+        "user is deactivated"
+      ) ||
+      description.includes(
+        "bot can't initiate conversation with a user"
+      )
+    );
+  }
+
+  /*
+   * Telegram іноді повертає 400 для чату,
+   * який більше недоступний.
+   */
+  if (errorCode === 400) {
+    return (
+      description.includes("chat not found")
+    );
+  }
+
+  return false;
 }
 
-async function markMasterInactive(env, telegramId) {
-  if (!env?.DB || telegramId == null) return;
+/* =========================================================
+ * ЗАПИС BOT STATUS
+ * ========================================================= */
+
+async function setMasterBotStatus(
+  env,
+  telegramId,
+  botStatus
+) {
+  if (
+    !env?.DB ||
+    telegramId == null ||
+    !["available", "unavailable"].includes(botStatus)
+  ) {
+    return;
+  }
 
   try {
     const result = await env.DB.prepare(`
       UPDATE masters
       SET
-        status = 'inactive',
-        updated_at = CURRENT_TIMESTAMP
+        bot_status = ?,
+        bot_status_checked_at = CURRENT_TIMESTAMP
       WHERE telegram_id = ?
-        AND status = 'active'
     `)
-      .bind(telegramId)
+      .bind(
+        botStatus,
+        telegramId
+      )
       .run();
 
     if (result.meta?.changes) {
       console.log(
-        `Master ${telegramId} marked inactive: Jobs bot unavailable`
+        `Master ${telegramId} bot_status -> ${botStatus}`
       );
     }
   } catch (err) {
     console.error(
-      `Failed to mark master ${telegramId} inactive:`,
+      `Failed to update bot_status for master ${telegramId}:`,
       err
     );
   }
 }
+
+/* =========================================================
+ * ОБРОБКА РЕЗУЛЬТАТУ ДОСТАВКИ
+ * ========================================================= */
 
 async function processMasterDeliveryResult(
   env,
   chatId,
   result
 ) {
-  if (isBotBlockedByUser(result)) {
-    await markMasterInactive(
+  /*
+   * Успішна доставка означає, що приватний
+   * чат із майстром доступний.
+   */
+  if (result?.ok) {
+    await setMasterBotStatus(
       env,
-      chatId
+      chatId,
+      "available"
+    );
+
+    return result;
+  }
+
+  /*
+   * Відомі Telegram-помилки недоступності.
+   */
+  if (isMasterTelegramUnavailable(result)) {
+    await setMasterBotStatus(
+      env,
+      chatId,
+      "unavailable"
     );
   }
 
+  /*
+   * Інші помилки (мережа, Telegram API,
+   * неправильний payload тощо) статус майстра
+   * не змінюють.
+   */
   return result;
 }
 
@@ -176,7 +251,8 @@ export async function editMasterMessage(
       text,
       disable_web_page_preview: true,
       reply_markup: {
-        inline_keyboard: inlineKeyboard || [],
+        inline_keyboard:
+          inlineKeyboard || [],
       },
     }
   );
@@ -197,7 +273,7 @@ export async function deleteMasterMessage(
   chatId,
   messageId
 ) {
-  return callJobsBot(
+  const result = await callJobsBot(
     env,
     "deleteMessage",
     {
@@ -205,6 +281,23 @@ export async function deleteMasterMessage(
       message_id: messageId,
     }
   );
+
+  /*
+   * deleteMessage не використовуємо як доказ
+   * available, оскільки помилка може стосуватися
+   * самого повідомлення.
+   *
+   * Але явне блокування бота можемо зафіксувати.
+   */
+  if (isMasterTelegramUnavailable(result)) {
+    await setMasterBotStatus(
+      env,
+      chatId,
+      "unavailable"
+    );
+  }
+
+  return result;
 }
 
 /* =========================================================
@@ -221,7 +314,8 @@ export async function answerJobsCallback(
     env,
     "answerCallbackQuery",
     {
-      callback_query_id: callbackQueryId,
+      callback_query_id:
+        callbackQueryId,
       text,
       show_alert: !!showAlert,
     }
@@ -242,9 +336,6 @@ export async function getJobsBotInfo(env) {
 
 /* =========================================================
  * ПОСТІЙНЕ НИЖНЄ МЕНЮ TELEGRAM
- *
- * ReplyKeyboard залишається доступним майстру незалежно
- * від того, яке повідомлення зараз відкрите.
  * ========================================================= */
 
 export async function setMasterMenu(
@@ -256,8 +347,10 @@ export async function setMasterMenu(
     "sendMessage",
     {
       chat_id: chatId,
-      text: "Меню SA-MASTER Jobs готове 👇",
+      text:
+        "Меню SA-MASTER Jobs готове 👇",
       disable_web_page_preview: true,
+
       reply_markup: {
         keyboard: [
           [
@@ -277,8 +370,10 @@ export async function setMasterMenu(
             },
           ],
         ],
+
         resize_keyboard: true,
         is_persistent: true,
+
         input_field_placeholder:
           "Оберіть дію",
       },
