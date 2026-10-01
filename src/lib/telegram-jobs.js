@@ -236,3 +236,4 @@ export async function unbanMasterFromJobsGroup(env, telegramId) {
     only_if_banned: true,
   });
 }
+
