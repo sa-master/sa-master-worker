@@ -187,3 +187,52 @@ export async function sendFileToMaster(env, chatId, { name, fileType, bytes, cap
     return { ok: false, description: String(err?.message || err) };
   }
 }
+
+/* =========================================================
+ * JOBS GROUP MEMBERSHIP HELPERS
+ * Restored for requests.js compatibility
+ * ========================================================= */
+
+export async function getJobsChatMember(env, telegramId) {
+  if (!env.JOBS_CHAT_ID) {
+    return { ok: false, description: "JOBS_CHAT_ID не встановлено" };
+  }
+  if (!telegramId) {
+    return { ok: false, description: "telegramId не вказано" };
+  }
+
+  return callJobsBot(env, "getChatMember", {
+    chat_id: env.JOBS_CHAT_ID,
+    user_id: telegramId,
+  });
+}
+
+export async function banMasterFromJobsGroup(env, telegramId) {
+  if (!env.JOBS_CHAT_ID) {
+    return { ok: false, description: "JOBS_CHAT_ID не встановлено" };
+  }
+  if (!telegramId) {
+    return { ok: false, description: "telegramId не вказано" };
+  }
+
+  return callJobsBot(env, "banChatMember", {
+    chat_id: env.JOBS_CHAT_ID,
+    user_id: telegramId,
+    revoke_messages: false,
+  });
+}
+
+export async function unbanMasterFromJobsGroup(env, telegramId) {
+  if (!env.JOBS_CHAT_ID) {
+    return { ok: false, description: "JOBS_CHAT_ID не встановлено" };
+  }
+  if (!telegramId) {
+    return { ok: false, description: "telegramId не вказано" };
+  }
+
+  return callJobsBot(env, "unbanChatMember", {
+    chat_id: env.JOBS_CHAT_ID,
+    user_id: telegramId,
+    only_if_banned: true,
+  });
+}
