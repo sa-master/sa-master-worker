@@ -21,17 +21,6 @@ import {
 
 const SITE_URL = "https://sa-master.pro/";
 
-/*
- * НОВА ЛОГІКА:
- * - нова заявка після передачі з адмінки одразу приходить
- *   окремим повідомленням усім active-майстрам;
- * - кнопки "Заявки" в основному меню більше немає;
- * - меню: "Мої заявки" / "Передати" / "Допомога";
- * - історія повідомлень не чиститься;
- * - /jobs залишено як приховану службову команду;
- * - старий callback jobs_list залишено для сумісності зі старими повідомленнями.
- */
-
 async function getMasterByTelegramId(env, telegramId) {
   return env.DB.prepare(
     "SELECT * FROM masters WHERE telegram_id = ? LIMIT 1"
@@ -115,15 +104,10 @@ async function getAssignedRequest(env, requestCode, masterId) {
 
 /* ========================= HOME ========================= */
 
-async function sendHome(
-  env,
-  chatId,
-  master
-) {
-  await setMasterMenu(
-    env,
-    chatId
-  );
+async function sendHome(env, chatId, master) {
+  const referralLink = await getMasterReferralLink(env, master.telegram_id);
+
+  await setMasterMenu(env, chatId, referralLink);
 
   return sendToMaster(
     env,
@@ -131,9 +115,7 @@ async function sendHome(
     [
       "🔧 SA-MASTER Jobs",
       "",
-      master?.first_name
-        ? `Вітаємо, ${master.first_name}!`
-        : "Вітаємо!",
+      master?.first_name ? `Вітаємо, ${master.first_name}!` : "Вітаємо!",
       "",
       "Нові доступні заявки автоматично з’являються в цьому чаті.",
       "",
@@ -254,10 +236,6 @@ export async function publishRequestToJobs(env, request) {
 
     if (!req) return { ok: false, description: "Заявку не знайдено" };
 
-    /*
-     * Не розсилаємо одну й ту саму заявку повторно,
-     * якщо вона вже була передана в Jobs.
-     */
     if (Number(req.transferred_to_jobs || 0) === 1) {
       return {
         ok: true,
@@ -506,6 +484,11 @@ async function handleMenuText(env, headers, chatId, fromUser, text) {
     return json({ ok: true }, headers);
   }
 
+  /*
+   * Fallback для старої клавіатури Telegram.
+   * У новому меню "➕ Передати" є Web App-кнопкою і цей текст
+   * за нормальної роботи вже не надсилається.
+   */
   if (["➕ Передати", "➕ Передати заявку"].includes(text)) {
     await showSubmitRequest(env, chatId, fromUser.id);
     return json({ ok: true }, headers);
@@ -642,7 +625,6 @@ export async function handleJobsWebhook(request, env, headers) {
     return json({ ok: true }, headers);
   }
 
-  /* Сумісність зі старими повідомленнями */
   if (data === "jobs_list") {
     const access = await ensureActiveMaster(env, cq.from.id);
     if (!access.active) {
@@ -1007,9 +989,7 @@ async function handleOutcomeBack(env, headers, requestCode, cq) {
 
 /* ========================= NOT AGREED ========================= */
 
-async function handleNotAgreedReason(
-  env, headers, requestCode, rawReason, cq
-) {
+async function handleNotAgreedReason(env, headers, requestCode, rawReason, cq) {
   const master = await getMasterByTelegramId(env, cq.from.id);
 
   if (!master || master.status !== "active") {
@@ -1141,10 +1121,6 @@ async function handleNotAgreedReason(
       [[{ text: "🏠 Головна", callback_data: "jobs_home" }]]
     );
 
-    /*
-     * Оскільки окремої кнопки "Заявки" більше немає,
-     * повернену заявку знову показуємо майстрам у чаті.
-     */
     const fresh = await env.DB.prepare(
       "SELECT * FROM requests WHERE id = ? LIMIT 1"
     ).bind(req.id).first();
