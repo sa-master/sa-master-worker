@@ -484,7 +484,10 @@ async function showMasterCard(
       text: "🚫 Заблокувати",
       callback_data: `master_block:${master.id}`,
     }]);
-  } else if (master.status === "blocked") {
+  } else if (
+    master.status === "blocked" ||
+    master.status === "inactive"
+  ) {
     buttons.push([{
       text: "✅ Розблокувати",
       callback_data: `master_unblock:${master.id}`,
