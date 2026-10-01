@@ -132,3 +132,28 @@ export async function setMasterMenu(env, chatId, referralUrl = null, text = "�
     },
   });
 }
+
+/* Відправити вкладення заявки в групу Jobs. */
+export async function sendFileToJobsGroup(env, { name, fileType, bytes, caption = "" }) {
+  if (!env.JOBS_BOT_TOKEN || !env.JOBS_CHAT_ID) {
+    return { ok: false, description: "JOBS_BOT_TOKEN або JOBS_CHAT_ID не встановлено" };
+  }
+
+  try {
+    const form = new FormData();
+    form.append("chat_id", String(env.JOBS_CHAT_ID));
+    form.append("caption", caption);
+    form.append("document", new Blob([bytes], { type: fileType || "application/octet-stream" }), name || "file");
+
+    const res = await fetch(`${TELEGRAM_API}/bot${env.JOBS_BOT_TOKEN}/sendDocument`, {
+      method: "POST",
+      body: form,
+    });
+    const data = await res.json();
+    if (!data.ok) console.error("Jobs bot sendDocument failed:", data.description || data);
+    return data;
+  } catch (err) {
+    console.error("Jobs bot sendDocument error:", err);
+    return { ok: false, description: String(err?.message || err) };
+  }
+}
