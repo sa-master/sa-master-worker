@@ -100,29 +100,21 @@ export async function activateMasterBot(env, telegramId) {
 
 /*
  * Постійне нижнє меню Telegram.
- * "➕ Передати" є Web App-кнопкою і одразу відкриває
- * персональну форму сайту.
+ * Клавіатура прикріплюється ДО основного повідомлення,
+ * тому окремого «Меню SA-MASTER Jobs готове 👇» більше немає.
  */
-export async function setMasterMenu(env, chatId, referralUrl = null) {
+export async function setMasterMenu(env, chatId, referralUrl = null, text = "🔧 SA-MASTER Jobs") {
   if (!chatId) {
-    return {
-      ok: false,
-      description: "chatId не вказано",
-    };
+    return { ok: false, description: "chatId не вказано" };
   }
 
   const transferButton = referralUrl
-    ? {
-        text: "➕ Передати",
-        web_app: { url: referralUrl },
-      }
-    : {
-        text: "➕ Передати",
-      };
+    ? { text: "➕ Передати", web_app: { url: referralUrl } }
+    : { text: "➕ Передати" };
 
   return callJobsBot(env, "sendMessage", {
     chat_id: chatId,
-    text: "Меню SA-MASTER Jobs готове 👇",
+    text,
     disable_web_page_preview: true,
     reply_markup: {
       keyboard: [
