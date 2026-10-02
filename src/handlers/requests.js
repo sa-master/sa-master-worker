@@ -1351,9 +1351,15 @@ export async function handleUpdateStatus(
   const statements = [
     env.DB.prepare(`
       UPDATE requests
-      SET status = ?, updated_at = CURRENT_TIMESTAMP
+      SET
+        status = ?,
+        transferred_to_jobs = CASE
+          WHEN ? = 'cancelled' THEN 0
+          ELSE transferred_to_jobs
+        END,
+        updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
-    `).bind(newStatus, current.id),
+    `).bind(newStatus, newStatus, current.id),
 
     env.DB.prepare(`
       INSERT INTO events (
@@ -2044,9 +2050,15 @@ async function handleTelegramStatusUpdate(
     await env.DB.batch([
       env.DB.prepare(`
         UPDATE requests
-        SET status = ?, updated_at = CURRENT_TIMESTAMP
+        SET
+          status = ?,
+          transferred_to_jobs = CASE
+            WHEN ? = 'cancelled' THEN 0
+            ELSE transferred_to_jobs
+          END,
+          updated_at = CURRENT_TIMESTAMP
         WHERE id = ?
-      `).bind(newStatus, current.id),
+      `).bind(newStatus, newStatus, current.id),
 
       env.DB.prepare(`
         INSERT INTO events (
