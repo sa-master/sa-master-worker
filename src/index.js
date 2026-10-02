@@ -83,6 +83,7 @@ function requireTelegramWebhookSecret(
 
 /* =========================================================
  * ONE-TIME MAIN TELEGRAM WEBHOOK SETUP
+ * TEMPORARY ROUTE — REMOVE AFTER SUCCESS
  * ========================================================= */
 
 async function handleSetupTelegramWebhook(
@@ -137,32 +138,43 @@ async function handleSetupTelegramWebhook(
       );
 
       return new Response(
-        JSON.stringify({
-          ok: false,
-          telegram: result,
-        }),
+        JSON.stringify(
+          {
+            ok: false,
+            telegram: result,
+          },
+          null,
+          2
+        ),
         {
           status: 502,
           headers: {
             ...headers,
-            "Content-Type": "application/json; charset=UTF-8",
+            "Content-Type":
+              "application/json; charset=UTF-8",
           },
         }
       );
     }
 
     return new Response(
-      JSON.stringify({
-        ok: true,
-        message: "Main Telegram webhook configured",
-        webhook_url: webhookUrl,
-        telegram: result,
-      }),
+      JSON.stringify(
+        {
+          ok: true,
+          message:
+            "Main Telegram webhook configured",
+          webhook_url: webhookUrl,
+          telegram: result,
+        },
+        null,
+        2
+      ),
       {
         status: 200,
         headers: {
           ...headers,
-          "Content-Type": "application/json; charset=UTF-8",
+          "Content-Type":
+            "application/json; charset=UTF-8",
         },
       }
     );
@@ -170,107 +182,6 @@ async function handleSetupTelegramWebhook(
   } catch (err) {
     console.error(
       "Main Telegram webhook setup failed:",
-      err
-    );
-
-    return error(
-      err?.message || String(err),
-      headers,
-      500
-    );
-  }
-}
-
-
-/* =========================================================
- * ONE-TIME JOBS WEBHOOK SETUP
- * ========================================================= */
-
-async function handleSetupJobsWebhook(
-  request,
-  env,
-  headers
-) {
-  if (!env.JOBS_BOT_TOKEN) {
-    return error(
-      "JOBS_BOT_TOKEN is not configured",
-      headers,
-      503
-    );
-  }
-
-  if (!env.JOBS_WEBHOOK_SECRET) {
-    return error(
-      "JOBS_WEBHOOK_SECRET is not configured",
-      headers,
-      503
-    );
-  }
-
-  const webhookUrl =
-    "https://sa-master-worker.c6hht469s9.workers.dev/jobs-webhook";
-
-  try {
-    const response = await fetch(
-      `https://api.telegram.org/bot${env.JOBS_BOT_TOKEN}/setWebhook`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          url: webhookUrl,
-          secret_token: env.JOBS_WEBHOOK_SECRET,
-          allowed_updates: [
-            "message",
-            "callback_query",
-          ],
-        }),
-      }
-    );
-
-    const result = await response.json();
-
-    if (!result?.ok) {
-      console.error(
-        "Telegram Jobs setWebhook failed:",
-        result
-      );
-
-      return new Response(
-        JSON.stringify({
-          ok: false,
-          telegram: result,
-        }),
-        {
-          status: 502,
-          headers: {
-            ...headers,
-            "Content-Type": "application/json; charset=UTF-8",
-          },
-        }
-      );
-    }
-
-    return new Response(
-      JSON.stringify({
-        ok: true,
-        message: "SA-MASTER Jobs webhook configured",
-        webhook_url: webhookUrl,
-        telegram: result,
-      }),
-      {
-        status: 200,
-        headers: {
-          ...headers,
-          "Content-Type": "application/json; charset=UTF-8",
-        },
-      }
-    );
-
-  } catch (err) {
-    console.error(
-      "Jobs webhook setup failed:",
       err
     );
 
@@ -331,6 +242,21 @@ const PUBLIC_ROUTES = [
     { auth: false }
   ],
 
+  /*
+   * ТИМЧАСОВИЙ МАРШРУТ.
+   *
+   * Потрібен лише один раз для реєстрації
+   * захищеного webhook основного Telegram-бота.
+   *
+   * Після успішної перевірки видалимо.
+   */
+  [
+    "GET",
+    /^\/setup-telegram-webhook$/,
+    handleSetupTelegramWebhook,
+    { auth: false }
+  ],
+
 ];
 
 
@@ -339,36 +265,6 @@ const PUBLIC_ROUTES = [
  * ========================================================= */
 
 const ADMIN_ROUTES = [
-
-  /*
-   * ONE-TIME ROUTE
-   *
-   * Реєструє захищений webhook
-   * основного Telegram-бота.
-   *
-   * Після успішного налаштування видалимо.
-   */
-  [
-    "POST",
-    /^\/setup-telegram-webhook$/,
-    handleSetupTelegramWebhook,
-    { auth: true }
-  ],
-
-  /*
-   * ONE-TIME ROUTE
-   *
-   * Реєструє захищений webhook
-   * SA-MASTER Jobs.
-   *
-   * Після успішного налаштування видалимо.
-   */
-  [
-    "POST",
-    /^\/setup-jobs-webhook$/,
-    handleSetupJobsWebhook,
-    { auth: true }
-  ],
 
   [
     "GET",
@@ -459,18 +355,12 @@ export default {
 
   async fetch(request, env, ctx) {
 
-    /* -----------------------------------------------------
-     * CORS preflight
-     * ----------------------------------------------------- */
-
     if (request.method === "OPTIONS") {
       return preflight();
     }
 
-
     const headers = corsHeaders();
     const url = new URL(request.url);
-
 
     try {
 
@@ -483,14 +373,16 @@ export default {
         url
       );
 
-
       if (pub) {
 
         /*
          * Основний Telegram webhook.
          */
 
-        if (url.pathname === "/telegram-webhook") {
+        if (
+          url.pathname ===
+          "/telegram-webhook"
+        ) {
 
           const webhookError =
             requireTelegramWebhookSecret(
@@ -503,7 +395,6 @@ export default {
           if (webhookError) {
             return webhookError;
           }
-
         }
 
 
@@ -511,7 +402,10 @@ export default {
          * SA-MASTER Jobs webhook.
          */
 
-        if (url.pathname === "/jobs-webhook") {
+        if (
+          url.pathname ===
+          "/jobs-webhook"
+        ) {
 
           const webhookError =
             requireTelegramWebhookSecret(
@@ -524,7 +418,6 @@ export default {
           if (webhookError) {
             return webhookError;
           }
-
         }
 
 
@@ -536,7 +429,6 @@ export default {
           url,
           ctx
         );
-
       }
 
 
@@ -549,7 +441,6 @@ export default {
         url
       );
 
-
       if (admin) {
 
         const authError =
@@ -559,11 +450,9 @@ export default {
             headers
           );
 
-
         if (authError) {
           return authError;
         }
-
 
         return await admin.handler(
           request,
@@ -573,13 +462,8 @@ export default {
           url,
           ctx
         );
-
       }
 
-
-      /* ===================================================
-       * 404
-       * =================================================== */
 
       return error(
         "Not found",
@@ -589,24 +473,17 @@ export default {
 
     } catch (err) {
 
-      /* ===================================================
-       * GLOBAL ERROR HANDLER
-       * =================================================== */
-
       console.error(
         "Unhandled error:",
         err
       );
-
 
       return error(
         err?.message || String(err),
         headers,
         500
       );
-
     }
-
   },
 
 };
