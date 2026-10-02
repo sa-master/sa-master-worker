@@ -82,6 +82,107 @@ function requireTelegramWebhookSecret(
 
 
 /* =========================================================
+ * ONE-TIME MAIN TELEGRAM WEBHOOK SETUP
+ * ========================================================= */
+
+async function handleSetupTelegramWebhook(
+  request,
+  env,
+  headers
+) {
+  if (!env.BOT_TOKEN) {
+    return error(
+      "BOT_TOKEN is not configured",
+      headers,
+      503
+    );
+  }
+
+  if (!env.TELEGRAM_WEBHOOK_SECRET) {
+    return error(
+      "TELEGRAM_WEBHOOK_SECRET is not configured",
+      headers,
+      503
+    );
+  }
+
+  const webhookUrl =
+    "https://sa-master-worker.c6hht469s9.workers.dev/telegram-webhook";
+
+  try {
+    const response = await fetch(
+      `https://api.telegram.org/bot${env.BOT_TOKEN}/setWebhook`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: webhookUrl,
+          secret_token: env.TELEGRAM_WEBHOOK_SECRET,
+          allowed_updates: [
+            "message",
+            "callback_query",
+          ],
+        }),
+      }
+    );
+
+    const result = await response.json();
+
+    if (!result?.ok) {
+      console.error(
+        "Telegram main setWebhook failed:",
+        result
+      );
+
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          telegram: result,
+        }),
+        {
+          status: 502,
+          headers: {
+            ...headers,
+            "Content-Type": "application/json; charset=UTF-8",
+          },
+        }
+      );
+    }
+
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        message: "Main Telegram webhook configured",
+        webhook_url: webhookUrl,
+        telegram: result,
+      }),
+      {
+        status: 200,
+        headers: {
+          ...headers,
+          "Content-Type": "application/json; charset=UTF-8",
+        },
+      }
+    );
+
+  } catch (err) {
+    console.error(
+      "Main Telegram webhook setup failed:",
+      err
+    );
+
+    return error(
+      err?.message || String(err),
+      headers,
+      500
+    );
+  }
+}
+
+
+/* =========================================================
  * ONE-TIME JOBS WEBHOOK SETUP
  * ========================================================= */
 
@@ -132,7 +233,7 @@ async function handleSetupJobsWebhook(
 
     if (!result?.ok) {
       console.error(
-        "Telegram setWebhook failed:",
+        "Telegram Jobs setWebhook failed:",
         result
       );
 
@@ -242,8 +343,23 @@ const ADMIN_ROUTES = [
   /*
    * ONE-TIME ROUTE
    *
-   * Використовується лише для реєстрації
-   * захищеного webhook SA-MASTER Jobs.
+   * Реєструє захищений webhook
+   * основного Telegram-бота.
+   *
+   * Після успішного налаштування видалимо.
+   */
+  [
+    "POST",
+    /^\/setup-telegram-webhook$/,
+    handleSetupTelegramWebhook,
+    { auth: true }
+  ],
+
+  /*
+   * ONE-TIME ROUTE
+   *
+   * Реєструє захищений webhook
+   * SA-MASTER Jobs.
    *
    * Після успішного налаштування видалимо.
    */
@@ -372,13 +488,6 @@ export default {
 
         /*
          * Основний Telegram webhook.
-         *
-         * Telegram повинен передавати:
-         *
-         * X-Telegram-Bot-Api-Secret-Token
-         *
-         * Значення повинно збігатися з
-         * TELEGRAM_WEBHOOK_SECRET у Cloudflare.
          */
 
         if (url.pathname === "/telegram-webhook") {
@@ -400,13 +509,6 @@ export default {
 
         /*
          * SA-MASTER Jobs webhook.
-         *
-         * Telegram повинен передавати:
-         *
-         * X-Telegram-Bot-Api-Secret-Token
-         *
-         * Значення повинно збігатися з
-         * JOBS_WEBHOOK_SECRET у Cloudflare.
          */
 
         if (url.pathname === "/jobs-webhook") {
