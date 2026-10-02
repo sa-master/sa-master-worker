@@ -1017,14 +1017,6 @@ async function handleTakeJob(env, headers, requestCode, cq) {
     return json({ ok: true }, headers);
   }
 
-  await saveEvent(
-    env,
-    req,
-    "master_took_job",
-    `${masterName} взяв заявку`,
-    master
-  );
-
   const privateText = [
     `✅ ВИ ВЗЯЛИ ЗАЯВКУ ${req.request_code}`,
     "",
@@ -1096,17 +1088,16 @@ async function handleTakeJob(env, headers, requestCode, cq) {
     return json({ ok: true }, headers);
   }
 
+  await saveEvent(
+    env,
+    req,
+    "master_took_job",
+    `${masterName} взяв заявку`,
+    master
+  );
+
   await answerJobsCallback(env, cq.id, "✅ Заявка ваша");
 
-  /*
-   * Картка заявки залишається без змін.
-   * Після успішного взяття прибираємо лише кнопку
-   * «🤝 Беру в роботу».
-   *
-   * ВАЖЛИВО:
-   * більше НЕ додаємо до тексту рядок
-   * «✅ Ви взяли цю заявку в роботу.»
-   */
   if (callbackMessageId) {
     try {
       const editResult = await editMasterMessage(
@@ -1554,8 +1545,7 @@ async function handleCooperationFailed(env, headers, requestCode, cq) {
 
   if (req.status !== "approved") {
     await answerJobsCallback(
-      env,
-      cq.id,
+      env, cq.id,
       req.status === "installation"
         ? "❌ Роботи вже розпочаті"
         : "❌ Ця дія зараз недоступна",
