@@ -19,6 +19,7 @@ import {
 } from "../lib/telegram-buttons.js";
 import {
   sendToMaster,
+  deleteMasterMessage,
 } from "../lib/telegram-jobs.js";
 import { publishRequestToJobs, deletePublishedRequestCards } from "./jobs.js";
 
@@ -759,6 +760,42 @@ async function deleteMasterPermanently(
     return false;
   }
 
+  /*
+   * Перед видаленням профілю прибираємо всі відстежувані
+   * картки заявок із приватного Telegram-чату цього майстра.
+   *
+   * Якщо окреме старе повідомлення Telegram вже недоступне,
+   * це не блокує саме видалення профілю.
+   */
+  try {
+    const tracked = await env.DB.prepare(`
+      SELECT id, chat_id, message_id
+      FROM job_messages
+      WHERE master_id = ?
+      ORDER BY id ASC
+    `).bind(master.id).all();
+
+    for (const row of tracked.results || []) {
+      try {
+        await deleteMasterMessage(
+          env,
+          row.chat_id,
+          row.message_id
+        );
+      } catch (err) {
+        console.error(
+          `Delete master Jobs message failed for ${row.chat_id}/${row.message_id}:`,
+          err
+        );
+      }
+    }
+  } catch (err) {
+    console.error(
+      "Load/delete tracked Jobs messages before master delete failed:",
+      err
+    );
+  }
+
   const cleanupSteps = [
     {
       name: "request_outcomes",
@@ -798,6 +835,20 @@ async function deleteMasterPermanently(
         WHERE author_type = 'master'
           AND author_id = ?
       `).bind(String(master.id)),
+    },
+    {
+      name: "job_messages",
+      statement: env.DB.prepare(`
+        DELETE FROM job_messages
+        WHERE master_id = ?
+      `).bind(master.id),
+    },
+    {
+      name: "master_ui_state",
+      statement: env.DB.prepare(`
+        DELETE FROM master_ui_state
+        WHERE chat_id = ?
+      `).bind(String(master.telegram_id)),
     },
     {
       name: "master_applications",
@@ -846,7 +897,8 @@ async function deleteMasterPermanently(
     [
       "🗑 МАЙСТРА ВИДАЛЕНО",
       "",
-      "Профіль, анкета, статистика та відомі персональні дані майстра видалені.",
+      "Профіль, анкета, статистика та службові записи майстра видалені.",
+      "Відстежувані картки заявок у його Jobs-чаті прибрані.",
       "",
       "Клієнтські заявки та їх історія залишилися в системі без прив'язки до видаленого профілю.",
     ].join("\n"),
