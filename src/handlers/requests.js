@@ -1407,6 +1407,30 @@ export async function handleUpdateStatus(
     return error("Не вдалося оновити статус", headers, 500);
   }
 
+  /*
+   * Завершені та скасовані заявки більше не повинні
+   * залишатися у вигляді старих карток у чатах майстрів.
+   */
+  if (["completed", "cancelled"].includes(newStatus)) {
+    try {
+      const cardsCleanup = await deletePublishedRequestCards(
+        env,
+        current.id
+      );
+
+      if (cardsCleanup.failed) {
+        console.warn(
+          `Final status Jobs cards cleanup: ${cardsCleanup.deleted} deleted, ${cardsCleanup.failed} failed`
+        );
+      }
+    } catch (err) {
+      console.error(
+        "Final status Jobs cards cleanup failed:",
+        err
+      );
+    }
+  }
+
   let object = null;
 
   if (current.object_id) {
@@ -2462,6 +2486,28 @@ async function handleJobsReviewClose(
     console.error("Admin close Jobs review failed:", err);
     await answerCallbackQuery(env, callbackId, "❌ Помилка збереження", true);
     return json({ ok: true }, headers);
+  }
+
+  /*
+   * Заявка скасована адміністратором після перевірки —
+   * прибираємо її картки з чатів усіх майстрів.
+   */
+  try {
+    const cardsCleanup = await deletePublishedRequestCards(
+      env,
+      req.id
+    );
+
+    if (cardsCleanup.failed) {
+      console.warn(
+        `Cancelled Jobs cards cleanup: ${cardsCleanup.deleted} deleted, ${cardsCleanup.failed} failed`
+      );
+    }
+  } catch (err) {
+    console.error(
+      "Cancelled Jobs cards cleanup failed:",
+      err
+    );
   }
 
   await editMessageText(
