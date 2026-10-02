@@ -371,9 +371,32 @@ export default {
       if (pub) {
 
         /*
-         * Основний Telegram webhook поки працює
-         * без окремого webhook secret.
+         * Основний Telegram webhook.
+         *
+         * Telegram повинен передавати:
+         *
+         * X-Telegram-Bot-Api-Secret-Token
+         *
+         * Значення повинно збігатися з
+         * TELEGRAM_WEBHOOK_SECRET у Cloudflare.
          */
+
+        if (url.pathname === "/telegram-webhook") {
+
+          const webhookError =
+            requireTelegramWebhookSecret(
+              request,
+              env,
+              "TELEGRAM_WEBHOOK_SECRET",
+              headers
+            );
+
+          if (webhookError) {
+            return webhookError;
+          }
+
+        }
+
 
         /*
          * SA-MASTER Jobs webhook.
