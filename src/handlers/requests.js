@@ -2069,6 +2069,31 @@ async function handleTelegramStatusUpdate(
     return json({ ok: true }, headers);
   }
 
+  /*
+   * Якщо адміністратор через Telegram переводить заявку
+   * у фінальний статус, прибираємо її публічні картки
+   * з чатів усіх майстрів.
+   */
+  if (["completed", "cancelled"].includes(newStatus)) {
+    try {
+      const cardsCleanup = await deletePublishedRequestCards(
+        env,
+        current.id
+      );
+
+      if (cardsCleanup.failed) {
+        console.warn(
+          `Telegram final status Jobs cards cleanup: ${cardsCleanup.deleted} deleted, ${cardsCleanup.failed} failed`
+        );
+      }
+    } catch (err) {
+      console.error(
+        "Telegram final status Jobs cards cleanup failed:",
+        err
+      );
+    }
+  }
+
   const req = await env.DB.prepare(`
     SELECT *
     FROM requests
