@@ -19,6 +19,7 @@ import {
 } from "../lib/telegram-buttons.js";
 import {
   sendToMaster,
+  setMasterMenu,
   deleteMasterMessage,
   removeMasterMenu,
 } from "../lib/telegram-jobs.js";
@@ -677,8 +678,35 @@ async function blockMaster(env, callbackId, masterId) {
     return false;
   }
 
+  /*
+   * Якщо зараз у чаті висить відстежуване службове меню,
+   * прибираємо саме повідомлення перед блокуванням.
+   */
   try {
-    await sendToMaster(
+    const uiState = await env.DB.prepare(`
+      SELECT transient_message_id
+      FROM master_ui_state
+      WHERE chat_id = ?
+      LIMIT 1
+    `).bind(String(master.telegram_id)).first();
+
+    if (uiState?.transient_message_id) {
+      await deleteMasterMessage(
+        env,
+        master.telegram_id,
+        uiState.transient_message_id
+      );
+    }
+  } catch (err) {
+    console.error("Blocked master UI cleanup failed:", err);
+  }
+
+  /*
+   * Telegram Reply Keyboard треба прибрати окремо.
+   * Одночасно показуємо фінальне повідомлення про блокування.
+   */
+  try {
+    await removeMasterMenu(
       env,
       master.telegram_id,
       [
@@ -691,7 +719,20 @@ async function blockMaster(env, callbackId, masterId) {
       ].join("\n")
     );
   } catch (err) {
-    console.error("Blocked master notification failed:", err);
+    console.error("Blocked master menu removal failed:", err);
+  }
+
+  /*
+   * Старий UI state більше не актуальний.
+   * При розблокуванні setMasterMenu створить новий.
+   */
+  try {
+    await env.DB.prepare(`
+      DELETE FROM master_ui_state
+      WHERE chat_id = ?
+    `).bind(String(master.telegram_id)).run();
+  } catch (err) {
+    console.error("Blocked master UI state cleanup failed:", err);
   }
 
   await answerCallbackQuery(env, callbackId, "🚫 Майстра заблоковано");
@@ -728,19 +769,30 @@ async function unblockMaster(env, callbackId, masterId) {
     return false;
   }
 
+  /*
+   * Після розблокування одразу повертаємо постійне нижнє меню.
+   * setMasterMenu також запам'ятає новий message_id у master_ui_state.
+   */
   try {
-    await sendToMaster(
+    await setMasterMenu(
       env,
       master.telegram_id,
+      null,
       [
         "✅ ДОСТУП ДО SA-MASTER Jobs ВІДНОВЛЕНО",
         "",
         "Ваш профіль знову активний.",
-        "Відкрийте бота та натисніть /start.",
+        "",
+        "Нові доступні заявки автоматично з’являтимуться в цьому чаті.",
+        "",
+        "Для керування використовуйте меню внизу:",
+        "🔧 Мої заявки — ваші активні заявки",
+        "➕ Передати — передати заявку іншому майстру",
+        "❓ Допомога — правила роботи з ботом",
       ].join("\n")
     );
   } catch (err) {
-    console.error("Unblocked master notification failed:", err);
+    console.error("Unblocked master menu restore failed:", err);
   }
 
   await answerCallbackQuery(env, callbackId, "✅ Майстра розблоковано");
