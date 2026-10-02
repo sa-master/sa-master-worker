@@ -20,6 +20,7 @@ import {
 import {
   sendToMaster,
   deleteMasterMessage,
+  removeMasterMenu,
 } from "../lib/telegram-jobs.js";
 import { publishRequestToJobs, deletePublishedRequestCards } from "./jobs.js";
 
@@ -792,6 +793,53 @@ async function deleteMasterPermanently(
   } catch (err) {
     console.error(
       "Load/delete tracked Jobs messages before master delete failed:",
+      err
+    );
+  }
+
+  try {
+    const uiState = await env.DB.prepare(`
+      SELECT transient_message_id
+      FROM master_ui_state
+      WHERE chat_id = ?
+      LIMIT 1
+    `).bind(String(master.telegram_id)).first();
+
+    if (uiState?.transient_message_id) {
+      try {
+        await deleteMasterMessage(
+          env,
+          master.telegram_id,
+          uiState.transient_message_id
+        );
+      } catch (err) {
+        console.error(
+          "Delete master current UI message failed:",
+          err
+        );
+      }
+    }
+  } catch (err) {
+    console.error(
+      "Load master UI state before delete failed:",
+      err
+    );
+  }
+
+  try {
+    await removeMasterMenu(
+      env,
+      master.telegram_id,
+      [
+        "ℹ️ ПРОФІЛЬ SA-MASTER Jobs ВИДАЛЕНО",
+        "",
+        "Ваш профіль видалено з системи.",
+        "Доступ до заявок вимкнено.",
+      ].join("\n")
+    );
+  } catch (err) {
+    console.error(
+      "Remove master Telegram menu failed:",
       err
     );
   }
