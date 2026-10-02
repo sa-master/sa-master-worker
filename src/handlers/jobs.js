@@ -381,10 +381,68 @@ export async function clearPublishedRequestCardButtons(env, req) {
         []
       );
 
-      if (result?.ok) updated++;
-      else failed++;
+      if (result?.ok) {
+        updated++;
+
+        try {
+          await env.DB.prepare(`
+            UPDATE job_messages
+            SET
+              buttons_removed_at = CURRENT_TIMESTAMP,
+              last_update_status = 'ok',
+              last_update_error = NULL
+            WHERE id = ?
+          `).bind(row.id).run();
+        } catch (statusErr) {
+          console.error(
+            `Save Jobs card update status failed for row ${row.id}:`,
+            statusErr
+          );
+        }
+      } else {
+        failed++;
+
+        const description = String(
+          result?.description || "Telegram edit failed"
+        );
+
+        try {
+          await env.DB.prepare(`
+            UPDATE job_messages
+            SET
+              last_update_status = 'failed',
+              last_update_error = ?
+            WHERE id = ?
+          `).bind(description, row.id).run();
+        } catch (statusErr) {
+          console.error(
+            `Save Jobs card failure status failed for row ${row.id}:`,
+            statusErr
+          );
+        }
+      }
     } catch (err) {
       failed++;
+
+      const description = String(
+        err?.message || err || "Unknown error"
+      );
+
+      try {
+        await env.DB.prepare(`
+          UPDATE job_messages
+          SET
+            last_update_status = 'failed',
+            last_update_error = ?
+          WHERE id = ?
+        `).bind(description, row.id).run();
+      } catch (statusErr) {
+        console.error(
+          `Save Jobs card exception status failed for row ${row.id}:`,
+          statusErr
+        );
+      }
+
       console.error(
         `Clear Jobs card buttons failed for ${row.chat_id}/${row.message_id}:`,
         err
