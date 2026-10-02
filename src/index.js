@@ -16,10 +16,7 @@ import {
 } from "./handlers/requests.js";
 
 import { handleJobsWebhook } from "./handlers/jobs.js";
-import {
-  handleGetObject,
-  handleUpdateObject,
-} from "./handlers/objects.js";
+import { handleGetObject, handleUpdateObject } from "./handlers/objects.js";
 
 import {
   handleUploadRequestProject,
@@ -60,9 +57,7 @@ function requireTelegramWebhookSecret(
   const expected = env?.[secretName];
 
   if (!expected) {
-    console.error(
-      `Missing required secret: ${secretName}`
-    );
+    console.error(`Missing required secret: ${secretName}`);
 
     return error(
       "Webhook security is not configured",
@@ -98,42 +93,42 @@ const PUBLIC_ROUTES = [
     "GET",
     /^\/$/,
     handleHealth,
-    { auth: false },
+    { auth: false }
   ],
 
   [
     "POST",
     /^\/$/,
     handleCreateRequest,
-    { auth: false },
+    { auth: false }
   ],
 
   [
     "GET",
     /^\/calculator-request\/([^/]+)$/,
     handleGetCalculatorRequest,
-    { auth: false },
+    { auth: false }
   ],
 
   [
     "POST",
     /^\/request\/([^/]+)\/project$/,
     handleUploadRequestProject,
-    { auth: false },
+    { auth: false }
   ],
 
   [
     "POST",
     /^\/telegram-webhook$/,
     handleTelegramWebhook,
-    { auth: false },
+    { auth: false }
   ],
 
   [
     "POST",
     /^\/jobs-webhook$/,
     handleJobsWebhook,
-    { auth: false },
+    { auth: false }
   ],
 
 ];
@@ -149,70 +144,70 @@ const ADMIN_ROUTES = [
     "GET",
     /^\/requests$/,
     handleListRequests,
-    { auth: true },
+    { auth: true }
   ],
 
   [
     "GET",
     /^\/request\/([^/]+)$/,
     handleGetRequest,
-    { auth: true },
+    { auth: true }
   ],
 
   [
     "POST",
     /^\/request\/([^/]+)\/status$/,
     handleUpdateStatus,
-    { auth: true },
+    { auth: true }
   ],
 
   [
     "GET",
     /^\/request\/([^/]+)\/events$/,
     handleGetEvents,
-    { auth: true },
+    { auth: true }
   ],
 
   [
     "POST",
     /^\/request\/([^/]+)\/client$/,
     handleAttachClient,
-    { auth: true },
+    { auth: true }
   ],
 
   [
     "GET",
     /^\/object\/([^/]+)$/,
     handleGetObject,
-    { auth: true },
+    { auth: true }
   ],
 
   [
     "PATCH",
     /^\/object\/([^/]+)$/,
     handleUpdateObject,
-    { auth: true },
+    { auth: true }
   ],
 
   [
     "POST",
     /^\/object\/([^/]+)\/file$/,
     handleUploadFile,
-    { auth: true },
+    { auth: true }
   ],
 
   [
     "GET",
     /^\/object\/([^/]+)\/files$/,
     handleListFiles,
-    { auth: true },
+    { auth: true }
   ],
 
   [
     "GET",
     /^\/object\/([^/]+)\/file\/(\d+)$/,
     handleDownloadFile,
-    { auth: true },
+    { auth: true }
   ],
 
 ];
@@ -222,11 +217,8 @@ const ADMIN_ROUTES = [
  * ROUTERS
  * ========================================================= */
 
-const routePublic =
-  createRouter(PUBLIC_ROUTES);
-
-const routeAdmin =
-  createRouter(ADMIN_ROUTES);
+const routePublic = createRouter(PUBLIC_ROUTES);
+const routeAdmin = createRouter(ADMIN_ROUTES);
 
 
 /* =========================================================
@@ -238,12 +230,13 @@ export default {
   async fetch(request, env, ctx) {
 
     /* -----------------------------------------------------
-     * CORS PREFLIGHT
+     * CORS preflight
      * ----------------------------------------------------- */
 
     if (request.method === "OPTIONS") {
       return preflight();
     }
+
 
     const headers = corsHeaders();
     const url = new URL(request.url);
@@ -260,16 +253,14 @@ export default {
         url
       );
 
+
       if (pub) {
 
-        /* -----------------------------------------------
-         * MAIN TELEGRAM BOT
-         * ----------------------------------------------- */
+        /*
+         * Основний Telegram webhook.
+         */
 
-        if (
-          url.pathname ===
-          "/telegram-webhook"
-        ) {
+        if (url.pathname === "/telegram-webhook") {
 
           const webhookError =
             requireTelegramWebhookSecret(
@@ -282,17 +273,15 @@ export default {
           if (webhookError) {
             return webhookError;
           }
+
         }
 
 
-        /* -----------------------------------------------
-         * SA-MASTER JOBS BOT
-         * ----------------------------------------------- */
+        /*
+         * SA-MASTER Jobs webhook.
+         */
 
-        if (
-          url.pathname ===
-          "/jobs-webhook"
-        ) {
+        if (url.pathname === "/jobs-webhook") {
 
           const webhookError =
             requireTelegramWebhookSecret(
@@ -305,12 +294,9 @@ export default {
           if (webhookError) {
             return webhookError;
           }
+
         }
 
-
-        /* -----------------------------------------------
-         * RUN PUBLIC HANDLER
-         * ----------------------------------------------- */
 
         return await pub.handler(
           request,
@@ -320,17 +306,19 @@ export default {
           url,
           ctx
         );
+
       }
 
 
       /* ===================================================
-       * ADMIN ROUTES
+       * ADMIN API ROUTES
        * =================================================== */
 
       const admin = await routeAdmin(
         request,
         url
       );
+
 
       if (admin) {
 
@@ -340,6 +328,7 @@ export default {
             env,
             headers
           );
+
 
         if (authError) {
           return authError;
@@ -354,11 +343,12 @@ export default {
           url,
           ctx
         );
+
       }
 
 
       /* ===================================================
-       * NOT FOUND
+       * 404
        * =================================================== */
 
       return error(
@@ -366,7 +356,6 @@ export default {
         headers,
         404
       );
-
 
     } catch (err) {
 
@@ -379,12 +368,15 @@ export default {
         err
       );
 
+
       return error(
         err?.message || String(err),
         headers,
         500
       );
+
     }
+
   },
 
 };
