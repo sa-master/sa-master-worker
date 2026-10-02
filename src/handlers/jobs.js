@@ -1927,6 +1927,30 @@ async function handleJobCompleted(env, headers, requestCode, cq) {
     master
   );
 
+  /*
+   * Після завершення робіт прибираємо всі публічні
+   * картки цієї заявки з чатів майстрів.
+   * Фінальне повідомлення майстру нижче не відстежується
+   * у job_messages і залишається в його чаті.
+   */
+  try {
+    const cardsCleanup = await deletePublishedRequestCards(
+      env,
+      req.id
+    );
+
+    if (cardsCleanup.failed) {
+      console.warn(
+        `Completed Jobs cards cleanup: ${cardsCleanup.deleted} deleted, ${cardsCleanup.failed} failed`
+      );
+    }
+  } catch (err) {
+    console.error(
+      "Completed Jobs cards cleanup failed:",
+      err
+    );
+  }
+
   await answerJobsCallback(env, cq.id, "✅ Роботи завершено");
 
   await sendToMaster(
