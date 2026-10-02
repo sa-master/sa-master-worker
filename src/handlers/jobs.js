@@ -183,6 +183,38 @@ async function sendTransient(env, chatId, text, buttons = null) {
   return rememberTransient(env, chatId, result);
 }
 
+/*
+ * Оновлює поточну картку сценарію замість створення нового повідомлення.
+ * Якщо Telegram не дозволив редагування — надсилає нову картку як fallback.
+ */
+async function updateFlowMessage(env, cq, text, buttons = null) {
+  const chatId = cq.message?.chat?.id || cq.from.id;
+  const messageId = cq.message?.message_id;
+
+  if (messageId) {
+    try {
+      const result = await editMasterMessage(
+        env,
+        chatId,
+        messageId,
+        text,
+        buttons || []
+      );
+
+      if (result?.ok) return result;
+
+      const description = String(result?.description || "");
+      if (description.includes("message is not modified")) return result;
+
+      console.error("Jobs flow message edit failed:", description || result);
+    } catch (err) {
+      console.error("Jobs flow message edit threw:", err);
+    }
+  }
+
+  return sendToMaster(env, chatId, text, buttons);
+}
+
 /* =========================================================
  * HOME
  * ========================================================= */
@@ -884,9 +916,9 @@ export async function handleJobsWebhook(request, env, headers) {
 
     await answerJobsCallback(env, cq.id, "✅ Контакт зафіксовано");
 
-    await sendToMaster(
+    await updateFlowMessage(
       env,
-      chatId,
+      cq,
       `📞 КОНТАКТ ІЗ ЗАМОВНИКОМ\n\n🆔 ${req.request_code}\n\nОдразу позначте результат розмови:`,
       buildMasterOutcomeButtons(req.request_code)
     );
@@ -1180,9 +1212,9 @@ async function handleMasterOutcome(env, headers, requestCode, outcome, cq) {
 
   if (outcome === "not_agreed") {
     await answerJobsCallback(env, cq.id, "");
-    await sendToMaster(
+    await updateFlowMessage(
       env,
-      chatId,
+      cq,
       `❌ НЕ ДОМОВИЛИСЬ\n\n🆔 ${req.request_code}\n\nОберіть основну причину:`,
       buildMasterNotAgreedReasonButtons(req.request_code)
     );
@@ -1235,9 +1267,9 @@ async function handleMasterOutcome(env, headers, requestCode, outcome, cq) {
 
   await answerJobsCallback(env, cq.id, "✅ Домовленість зафіксовано");
 
-  await sendToMaster(
+  await updateFlowMessage(
     env,
-    chatId,
+    cq,
     `✅ ДОМОВИЛИСЬ\n\n🆔 ${req.request_code}\n\nДомовленість зафіксовано.\n\n👉 НАСТУПНИЙ КРОК:\nКоли фактично почнете роботи — натисніть «🔧 Роботи розпочато».`,
     buildAgreedJobButtons(req.request_code)
   );
@@ -1386,9 +1418,9 @@ async function handleNotAgreedReason(
   await answerJobsCallback(env, cq.id, "✅ Причину збережено");
 
   if (needsAdminReview) {
-    await sendToMaster(
+    await updateFlowMessage(
       env,
-      chatId,
+      cq,
       `🕓 ЗАЯВКУ ПЕРЕДАНО НА ПЕРЕВІРКУ\n\n🆔 ${req.request_code}\n📝 Причина: ${reasonLabels[reason]}\n\nЗаявка більше не закріплена за вами.`,
       [
         [{ text: "🔧 Мої заявки", callback_data: "my_jobs" }],
@@ -1422,9 +1454,9 @@ async function handleNotAgreedReason(
       ]
     );
   } else {
-    await sendToMaster(
+    await updateFlowMessage(
       env,
-      chatId,
+      cq,
       `↩️ ЗАЯВКУ ПОВЕРНУТО\n\n🆔 ${req.request_code}\n\n📝 Причина: ${reasonLabels[reason]}\n\nЗаявка знову доступна іншим майстрам.`,
       [[{ text: "🏠 Головна", callback_data: "jobs_home" }]]
     );
@@ -1516,9 +1548,9 @@ async function handleJobStarted(env, headers, requestCode, cq) {
 
   await answerJobsCallback(env, cq.id, "🔧 Початок робіт зафіксовано");
 
-  await sendToMaster(
+  await updateFlowMessage(
     env,
-    chatId,
+    cq,
     `🔧 РОБОТИ РОЗПОЧАТО\n\n🆔 ${req.request_code}\n\n👉 НАСТУПНИЙ КРОК:\nПісля фактичного завершення натисніть «✅ Роботи завершено».`,
     buildStartedJobButtons(req.request_code)
   );
@@ -1565,9 +1597,9 @@ async function handleCooperationFailed(env, headers, requestCode, cq) {
 
   await answerJobsCallback(env, cq.id, "");
 
-  await sendToMaster(
+  await updateFlowMessage(
     env,
-    cq.message?.chat?.id || cq.from.id,
+    cq,
     `↩️ СПІВПРАЦЯ НЕ ВІДБУЛАСЬ\n\n🆔 ${req.request_code}\n\nОберіть основну причину:`,
     buildMasterNotAgreedReasonButtons(req.request_code)
   );
@@ -1640,9 +1672,9 @@ async function handleJobCompleted(env, headers, requestCode, cq) {
 
   await answerJobsCallback(env, cq.id, "✅ Роботи завершено");
 
-  await sendToMaster(
+  await updateFlowMessage(
     env,
-    chatId,
+    cq,
     `✅ РОБОТИ ЗАВЕРШЕНО\n\n🆔 ${req.request_code}\n\nЗаявку завершено. Дякуємо!`,
     [
       [{ text: "🔧 Мої заявки", callback_data: "my_jobs" }],
