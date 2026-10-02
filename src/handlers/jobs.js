@@ -6,6 +6,7 @@ import {
   activateMasterBot,
   deleteMasterMessage,
   sendFileToMaster,
+  editMasterMessage,
 } from "../lib/telegram-jobs.js";
 import { sendTelegram, sendMessageWithButtons } from "../lib/telegram.js";
 import {
@@ -283,7 +284,6 @@ async function broadcastJob(env, req, returned = false) {
   return { total: masters.length, delivered, failed };
 }
 
-
 async function broadcastRequestAttachments(env, req) {
   if (!req?.id || !env.FILES) return;
 
@@ -337,38 +337,25 @@ export async function publishRequestToJobs(env, request) {
 
   try {
     const req = request.id
-      ? await env.DB.prepare(
-          "SELECT * FROM requests WHERE id = ? LIMIT 1"
-        ).bind(request.id).first()
-      : await env.DB.prepare(
-          "SELECT * FROM requests WHERE request_code = ? LIMIT 1"
-        ).bind(request.request_code).first();
+      ? await env.DB.prepare("SELECT * FROM requests WHERE id = ? LIMIT 1").bind(request.id).first()
+      : await env.DB.prepare("SELECT * FROM requests WHERE request_code = ? LIMIT 1").bind(request.request_code).first();
 
     if (!req) return { ok: false, description: "Заявку не знайдено" };
 
     if (Number(req.transferred_to_jobs || 0) === 1) {
-      return {
-        ok: true,
-        already_published: true,
-        request_code: req.request_code,
-      };
+      return { ok: true, already_published: true, request_code: req.request_code };
     }
 
     const result = await env.DB.prepare(`
       UPDATE requests
-      SET
-        transferred_to_jobs = 1,
-        transferred_at = COALESCE(transferred_at, CURRENT_TIMESTAMP),
-        updated_at = CURRENT_TIMESTAMP
+      SET transferred_to_jobs = 1,
+          transferred_at = COALESCE(transferred_at, CURRENT_TIMESTAMP),
+          updated_at = CURRENT_TIMESTAMP
       WHERE id = ? AND COALESCE(transferred_to_jobs, 0) = 0
     `).bind(req.id).run();
 
     if (!result.meta?.changes) {
-      return {
-        ok: true,
-        already_published: true,
-        request_code: req.request_code,
-      };
+      return { ok: true, already_published: true, request_code: req.request_code };
     }
 
     const fresh = await env.DB.prepare(
@@ -426,11 +413,7 @@ async function showAvailableJobs(env, chatId) {
     );
   }
 
-  await sendToMaster(
-    env,
-    chatId,
-    `📋 АКТУАЛЬНІ ВІЛЬНІ ЗАЯВКИ\n\nЗараз доступно: ${jobs.length}`
-  );
+  await sendToMaster(env, chatId, `📋 АКТУАЛЬНІ ВІЛЬНІ ЗАЯВКИ\n\nЗараз доступно: ${jobs.length}`);
 
   for (const req of jobs) {
     await sendToMaster(env, chatId, publicJobText(req), publicJobButtons(req));
@@ -470,8 +453,7 @@ async function showMyJobs(env, chatId, master) {
 
   if (!jobs.length) {
     return sendTransient(
-      env,
-      chatId,
+      env, chatId,
       "🔧 МОЇ ЗАЯВКИ\n\nУ вас зараз немає активних заявок.\n\nНові доступні заявки з'являються прямо в чаті.",
       [[{ text: "🏠 Головна", callback_data: "jobs_home" }]]
     );
@@ -481,12 +463,10 @@ async function showMyJobs(env, chatId, master) {
     text: `${myJobStep(req)} · ${req.request_code}`,
     callback_data: `my_job_open:${req.request_code}`,
   }]);
-
   buttons.push([{ text: "🏠 Головна", callback_data: "jobs_home" }]);
 
   return sendTransient(
-    env,
-    chatId,
+    env, chatId,
     `🔧 МОЇ ЗАЯВКИ\n\nАктивних: ${jobs.length}\n\nОберіть заявку:`,
     buttons
   );
@@ -497,37 +477,23 @@ async function showMyJobCard(env, chatId, master, requestCode) {
   if (error) return sendToMaster(env, chatId, error);
 
   const base = [
-    `🔧 МОЯ ЗАЯВКА ${req.request_code}`,
-    "",
+    `🔧 МОЯ ЗАЯВКА ${req.request_code}`, "",
     `👤 ${req.name || "—"}`,
     `📞 ${req.phone || "—"}`,
     `🔧 ${req.type_label || req.type || "—"}`,
     `📍 ${req.location || "—"}`,
     req.timing ? `🗓 ${req.timing}` : null,
-    req.notes ? `📝 ${req.notes}` : null,
-    "",
+    req.notes ? `📝 ${req.notes}` : null, "",
   ].filter(Boolean);
 
   if (req.status === "installation") {
-    base.push(
-      "👉 НАСТУПНИЙ КРОК:",
-      "Після фактичного завершення натисніть «✅ Роботи завершено»."
-    );
-    return sendToMaster(
-      env, chatId, base.join("\n"),
-      buildStartedJobButtons(req.request_code)
-    );
+    base.push("👉 НАСТУПНИЙ КРОК:", "Після фактичного завершення натисніть «✅ Роботи завершено».");
+    return sendToMaster(env, chatId, base.join("\n"), buildStartedJobButtons(req.request_code));
   }
 
   if (req.status === "approved") {
-    base.push(
-      "👉 НАСТУПНИЙ КРОК:",
-      "Коли фактично почнете виконувати роботи — натисніть «🔧 Роботи розпочато»."
-    );
-    return sendToMaster(
-      env, chatId, base.join("\n"),
-      buildAgreedJobButtons(req.request_code)
-    );
+    base.push("👉 НАСТУПНИЙ КРОК:", "Коли фактично почнете виконувати роботи — натисніть «🔧 Роботи розпочато».");
+    return sendToMaster(env, chatId, base.join("\n"), buildAgreedJobButtons(req.request_code));
   }
 
   base.push(
@@ -536,28 +502,22 @@ async function showMyJobCard(env, chatId, master, requestCode) {
     "2. Одразу після розмови зафіксуйте результат у боті."
   );
 
-  return sendToMaster(
-    env, chatId, base.join("\n"),
-    buildContactButtons(req.request_code, req.phone)
-  );
+  return sendToMaster(env, chatId, base.join("\n"), buildContactButtons(req.request_code, req.phone));
 }
 
 /* ========================= HELP / SUBMIT ========================= */
 
 async function showHelp(env, chatId) {
   return sendTransient(
-    env,
-    chatId,
+    env, chatId,
     [
-      "❓ ЯК КОРИСТУВАТИСЯ SA-MASTER Jobs",
-      "",
+      "❓ ЯК КОРИСТУВАТИСЯ SA-MASTER Jobs", "",
       "1️⃣ Нові заявки автоматично з'являються прямо в чаті.",
       "2️⃣ Натискайте «🤝 Беру в роботу» лише якщо готові зв'язатися із замовником.",
       "3️⃣ Після взяття заявка переходить у «🔧 Мої заявки».",
       "4️⃣ Зателефонуйте замовнику та одразу позначте результат.",
       "5️⃣ Якщо домовились — після фактичного старту натисніть «🔧 Роботи розпочато».",
-      "6️⃣ Після завершення — «✅ Роботи завершено».",
-      "",
+      "6️⃣ Після завершення — «✅ Роботи завершено».", "",
       "💡 Старі повідомлення залишаються в історії чату.",
       "Якщо заявку вже забрав інший майстер, повторно взяти її не вийде.",
     ].join("\n"),
@@ -567,14 +527,10 @@ async function showHelp(env, chatId) {
 
 async function showSubmitRequest(env, chatId, telegramId) {
   const referralLink = await getMasterReferralLink(env, telegramId);
-
-  if (!referralLink) {
-    return sendTransient(env, chatId, "❌ Не вдалося створити посилання.");
-  }
+  if (!referralLink) return sendTransient(env, chatId, "❌ Не вдалося створити посилання.");
 
   return sendTransient(
-    env,
-    chatId,
+    env, chatId,
     "➕ ПЕРЕДАТИ ЗАЯВКУ\n\nНатисніть кнопку нижче та заповніть заявку від імені замовника.\n\nЗаявка автоматично буде прив'язана до вашого профілю SA-MASTER Jobs.",
     [
       [{ text: "➕ Заповнити заявку", url: referralLink }],
@@ -596,11 +552,6 @@ async function handleMenuText(env, headers, chatId, fromUser, text) {
     return json({ ok: true }, headers);
   }
 
-  /*
-   * Fallback для старої клавіатури Telegram.
-   * У новому меню "➕ Передати" є Web App-кнопкою і цей текст
-   * за нормальної роботи вже не надсилається.
-   */
   if (["➕ Передати", "➕ Передати заявку"].includes(text)) {
     await showSubmitRequest(env, chatId, fromUser.id);
     return json({ ok: true }, headers);
@@ -618,7 +569,6 @@ async function handleMenuText(env, headers, chatId, fromUser, text) {
 
 export async function handleJobsWebhook(request, env, headers) {
   let update;
-
   try {
     update = await request.json();
   } catch {
@@ -632,63 +582,48 @@ export async function handleJobsWebhook(request, env, headers) {
     const text = String(msg.text || "").trim();
 
     if (!fromUser?.id) return json({ ok: true }, headers);
-
     await activateMasterBot(env, fromUser.id);
 
     if (text === "/start" || text.startsWith("/start ")) {
       const master = await getMasterByTelegramId(env, fromUser.id);
-
       if (master?.status === "active") {
         await sendHome(env, chatId, master);
         return json({ ok: true }, headers);
       }
-
       if (master) {
         await sendToMaster(env, chatId, masterAccessMessage(master.status));
         return json({ ok: true }, headers);
       }
-
       return handleJoinStart(env, headers, chatId, fromUser);
     }
 
     if (text === "/join" || text.startsWith("/join ")) {
       const master = await getMasterByTelegramId(env, fromUser.id);
-
       if (master?.status === "active") {
         await sendHome(env, chatId, master);
         return json({ ok: true }, headers);
       }
-
       if (master) {
         await sendToMaster(env, chatId, masterAccessMessage(master.status));
         return json({ ok: true }, headers);
       }
-
       return handleJoinStart(env, headers, chatId, fromUser);
     }
 
     if (text === "/jobs" || text.startsWith("/jobs ")) {
       const access = await ensureActiveMaster(env, fromUser.id);
-
       if (!access.active) {
         await sendToMaster(env, chatId, masterAccessMessage(access.master?.status));
         return json({ ok: true }, headers);
       }
-
       await showAvailableJobs(env, chatId);
       return json({ ok: true }, headers);
     }
 
     const master = await getMasterByTelegramId(env, fromUser.id);
+    if (!master) return handleJoinMessage(env, headers, chatId, fromUser, text);
 
-    if (!master) {
-      return handleJoinMessage(env, headers, chatId, fromUser, text);
-    }
-
-    const menuResult = await handleMenuText(
-      env, headers, chatId, fromUser, text
-    );
-
+    const menuResult = await handleMenuText(env, headers, chatId, fromUser, text);
     if (menuResult) return menuResult;
     return json({ ok: true }, headers);
   }
@@ -703,25 +638,15 @@ export async function handleJobsWebhook(request, env, headers) {
 
   if (data === "join_start") {
     const master = await getMasterByTelegramId(env, cq.from.id);
-
     if (master?.status === "active") {
       await answerJobsCallback(env, cq.id, "✅ Ви вже зареєстровані");
       await sendHome(env, chatId, master);
       return json({ ok: true }, headers);
     }
-
     if (master) {
-      await answerJobsCallback(
-        env,
-        cq.id,
-        master.status === "blocked"
-          ? "🚫 Ваш профіль заблоковано"
-          : "⚪ Ваш профіль неактивний",
-        true
-      );
+      await answerJobsCallback(env, cq.id, master.status === "blocked" ? "🚫 Ваш профіль заблоковано" : "⚪ Ваш профіль неактивний", true);
       return json({ ok: true }, headers);
     }
-
     await answerJobsCallback(env, cq.id, "📝 Починаємо анкету");
     return handleJoinStart(env, headers, chatId, cq.from);
   }
@@ -767,9 +692,7 @@ export async function handleJobsWebhook(request, env, headers) {
     }
     await answerJobsCallback(env, cq.id, "");
     await clearTransient(env, chatId);
-    await showMyJobCard(
-      env, chatId, access.master, data.slice("my_job_open:".length)
-    );
+    await showMyJobCard(env, chatId, access.master, data.slice("my_job_open:".length));
     return json({ ok: true }, headers);
   }
 
@@ -803,84 +726,41 @@ export async function handleJobsWebhook(request, env, headers) {
     }
 
     const requestCode = data.slice("contact_done:".length);
-    const { req, error } = await getAssignedRequest(
-      env, requestCode, access.master.id
-    );
-
+    const { req, error } = await getAssignedRequest(env, requestCode, access.master.id);
     if (error) {
       await answerJobsCallback(env, cq.id, error, true);
       return json({ ok: true }, headers);
     }
 
-    await saveEvent(
-      env,
-      req,
-      "master_contact_confirmed",
+    await saveEvent(env, req, "master_contact_confirmed",
       `${masterDisplayName(access.master, cq.from)} підтвердив контакт із замовником`,
       access.master
     );
 
     await answerJobsCallback(env, cq.id, "✅ Контакт зафіксовано");
-
     await sendToMaster(
-      env,
-      chatId,
+      env, chatId,
       `📞 КОНТАКТ ІЗ ЗАМОВНИКОМ\n\n🆔 ${req.request_code}\n\nОдразу позначте результат розмови:`,
       buildMasterOutcomeButtons(req.request_code)
     );
-
     return json({ ok: true }, headers);
   }
 
-  if (data.startsWith("take:")) {
-    return handleTakeJob(env, headers, data.slice(5), cq);
-  }
-
+  if (data.startsWith("take:")) return handleTakeJob(env, headers, data.slice(5), cq);
   if (data.startsWith("outcome:")) {
     const [, requestCode, outcome] = data.split(":");
     return handleMasterOutcome(env, headers, requestCode, outcome, cq);
   }
-
-  if (data.startsWith("outcome_back:")) {
-    return handleOutcomeBack(
-      env, headers, data.slice("outcome_back:".length), cq
-    );
-  }
-
+  if (data.startsWith("outcome_back:")) return handleOutcomeBack(env, headers, data.slice("outcome_back:".length), cq);
   if (data.startsWith("not_agreed_reason:")) {
     const [, requestCode, reason] = data.split(":");
     return handleNotAgreedReason(env, headers, requestCode, reason, cq);
   }
-
-  if (data.startsWith("job_started:")) {
-    return handleJobStarted(
-      env, headers, data.slice("job_started:".length), cq
-    );
-  }
-
-  if (data.startsWith("cooperation_failed:")) {
-    return handleCooperationFailed(
-      env, headers, data.slice("cooperation_failed:".length), cq
-    );
-  }
-
-  if (data.startsWith("job_completed:")) {
-    return handleJobCompleted(
-      env, headers, data.slice("job_completed:".length), cq
-    );
-  }
-
-  if (data.startsWith("app_approve:")) {
-    return handleApplicationReview(
-      env, headers, Number(data.slice(12)), "approve", cq
-    );
-  }
-
-  if (data.startsWith("app_reject:")) {
-    return handleApplicationReview(
-      env, headers, Number(data.slice(11)), "reject", cq
-    );
-  }
+  if (data.startsWith("job_started:")) return handleJobStarted(env, headers, data.slice("job_started:".length), cq);
+  if (data.startsWith("cooperation_failed:")) return handleCooperationFailed(env, headers, data.slice("cooperation_failed:".length), cq);
+  if (data.startsWith("job_completed:")) return handleJobCompleted(env, headers, data.slice("job_completed:".length), cq);
+  if (data.startsWith("app_approve:")) return handleApplicationReview(env, headers, Number(data.slice(12)), "approve", cq);
+  if (data.startsWith("app_reject:")) return handleApplicationReview(env, headers, Number(data.slice(11)), "reject", cq);
 
   await answerJobsCallback(env, cq.id, "❓ Невідома дія", true);
   return json({ ok: true }, headers);
@@ -893,11 +773,8 @@ async function handleTakeJob(env, headers, requestCode, cq) {
 
   if (!master || master.status !== "active") {
     await answerJobsCallback(
-      env,
-      cq.id,
-      master?.status === "blocked"
-        ? "🚫 Ваш профіль заблоковано"
-        : "❌ Немає доступу",
+      env, cq.id,
+      master?.status === "blocked" ? "🚫 Ваш профіль заблоковано" : "❌ Немає доступу",
       true
     );
     return json({ ok: true }, headers);
@@ -915,58 +792,125 @@ async function handleTakeJob(env, headers, requestCode, cq) {
   }
 
   const masterName = masterDisplayName(master, cq.from);
+  const callbackChatId = cq.message?.chat?.id || cq.from.id;
+  const callbackMessageId = cq.message?.message_id;
 
   let assigned;
   try {
     assigned = await env.DB.prepare(`
       UPDATE requests
-      SET
-        assigned_master_id = ?,
-        assigned_master_name = ?,
-        assigned_at = CURRENT_TIMESTAMP,
-        updated_at = CURRENT_TIMESTAMP
+      SET assigned_master_id = ?,
+          assigned_master_name = ?,
+          assigned_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
         AND transferred_to_jobs = 1
         AND assigned_master_id IS NULL
         AND status NOT IN ('cancelled', 'installation', 'completed')
     `).bind(master.id, masterName, req.id).run();
   } catch (err) {
-    console.error("Take job failed:", err);
+    console.error("Take job DB update failed:", err);
     await answerJobsCallback(env, cq.id, "❌ Помилка збереження", true);
     return json({ ok: true }, headers);
   }
 
   if (!assigned.meta?.changes) {
-    await answerJobsCallback(
-      env, cq.id, "❌ Цю заявку вже взяв інший майстер", true
-    );
+    await answerJobsCallback(env, cq.id, "❌ Цю заявку вже взяв інший майстер", true);
     return json({ ok: true }, headers);
   }
 
   await saveEvent(env, req, "master_took_job", `${masterName} взяв заявку`, master);
+
+  const privateText = [
+    `✅ ВИ ВЗЯЛИ ЗАЯВКУ ${req.request_code}`,
+    "",
+    `👤 Клієнт: ${req.name || "—"}`,
+    `📞 Телефон: ${req.phone || "—"}`,
+    `🔧 Роботи: ${req.type_label || req.type || "—"}`,
+    `📍 Об'єкт: ${req.location || "—"}`,
+    req.timing ? `🗓 Початок: ${req.timing}` : null,
+    req.notes ? `📝 Опис: ${String(req.notes).replace(/^Опис роботи:\s*/i, "")}` : null,
+    "",
+    "👉 ЗАРАЗ ПОТРІБНО:",
+    "1. Зв'язатися із замовником.",
+    "2. Після розмови натиснути «✅ Я зв'язався» та вказати результат.",
+    "",
+    "Заявка збережена у «🔧 Мої заявки».",
+  ].filter(Boolean).join("\n");
+
+  let delivery;
+  try {
+    delivery = await sendToMaster(
+      env,
+      callbackChatId,
+      privateText,
+      buildContactButtons(req.request_code, req.phone)
+    );
+  } catch (err) {
+    console.error("TAKE JOB: sendToMaster threw:", err);
+    delivery = { ok: false, description: String(err?.message || err) };
+  }
+
+  if (!delivery?.ok) {
+    console.error("TAKE JOB: private card delivery FAILED", {
+      requestCode: req.request_code,
+      masterId: master.id,
+      telegramId: master.telegram_id,
+      callbackChatId,
+      description: delivery?.description || delivery,
+    });
+
+    // Повертаємо заявку у вільний стан, бо майстер не отримав контактну картку.
+    try {
+      await env.DB.prepare(`
+        UPDATE requests
+        SET assigned_master_id = NULL,
+            assigned_master_name = NULL,
+            assigned_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND assigned_master_id = ?
+      `).bind(req.id, master.id).run();
+    } catch (rollbackErr) {
+      console.error("TAKE JOB: rollback failed:", rollbackErr);
+    }
+
+    await answerJobsCallback(
+      env,
+      cq.id,
+      `❌ Не вдалося відкрити заявку. Спробуйте ще раз.`,
+      true
+    );
+
+    return json({ ok: true }, headers);
+  }
+
+  // Тільки після гарантованої доставки контактної картки підтверджуємо callback.
   await answerJobsCallback(env, cq.id, "✅ Заявка ваша");
 
-  await sendToMaster(
-    env,
-    master.telegram_id,
-    [
-      `✅ ВИ ВЗЯЛИ ЗАЯВКУ ${req.request_code}`,
-      "",
-      `👤 Клієнт: ${req.name || "—"}`,
-      `📞 Телефон: ${req.phone || "—"}`,
-      `🔧 Роботи: ${req.type_label || req.type || "—"}`,
-      `📍 Об'єкт: ${req.location || "—"}`,
-      req.timing ? `🗓 Початок: ${req.timing}` : null,
-      req.notes ? `📝 Опис: ${String(req.notes).replace(/^Опис роботи:\s*/i, "")}` : null,
-      "",
-      "👉 ЗАРАЗ ПОТРІБНО:",
-      "1. Зв'язатися із замовником.",
-      "2. Після розмови натиснути «✅ Я зв'язався» та вказати результат.",
-      "",
-      "Заявка збережена у «🔧 Мої заявки».",
-    ].filter(Boolean).join("\n"),
-    buildContactButtons(req.request_code, req.phone)
-  );
+  // У повідомленні, на якому майстер натиснув кнопку, прибираємо стару кнопку "Беру в роботу".
+  if (callbackMessageId) {
+    try {
+      const editedText = [
+        publicJobText(req),
+        "",
+        "✅ Ви взяли цю заявку в роботу.",
+      ].join("\n");
+
+      const editResult = await editMasterMessage(
+        env,
+        callbackChatId,
+        callbackMessageId,
+        editedText,
+        []
+      );
+
+      if (!editResult?.ok) {
+        console.error("TAKE JOB: could not remove take button:", editResult?.description || editResult);
+      }
+    } catch (err) {
+      console.error("TAKE JOB: edit source card failed:", err);
+    }
+  }
 
   await notifyAdmin(env, [
     "🔔 ЗАЯВКУ ВЗЯТО",
@@ -983,7 +927,6 @@ async function handleTakeJob(env, headers, requestCode, cq) {
 
 async function handleMasterOutcome(env, headers, requestCode, outcome, cq) {
   const master = await getMasterByTelegramId(env, cq.from.id);
-
   if (!master || master.status !== "active") {
     await answerJobsCallback(env, cq.id, "❌ Немає доступу", true);
     return json({ ok: true }, headers);
@@ -995,26 +938,23 @@ async function handleMasterOutcome(env, headers, requestCode, outcome, cq) {
   }
 
   const { req, error } = await getAssignedRequest(env, requestCode, master.id);
-
   if (error) {
     await answerJobsCallback(env, cq.id, error, true);
     return json({ ok: true }, headers);
   }
 
   if (["installation", "completed", "cancelled"].includes(req.status)) {
-    await answerJobsCallback(
-      env, cq.id, "ℹ️ Результат цієї заявки вже зафіксовано", true
-    );
+    await answerJobsCallback(env, cq.id, "ℹ️ Результат цієї заявки вже зафіксовано", true);
     return json({ ok: true }, headers);
   }
 
   const masterName = masterDisplayName(master, cq.from);
+  const chatId = cq.message?.chat?.id || cq.from.id;
 
   if (outcome === "not_agreed") {
     await answerJobsCallback(env, cq.id, "");
     await sendToMaster(
-      env,
-      master.telegram_id,
+      env, chatId,
       `❌ НЕ ДОМОВИЛИСЬ\n\n🆔 ${req.request_code}\n\nОберіть основну причину:`,
       buildMasterNotAgreedReasonButtons(req.request_code)
     );
@@ -1031,9 +971,7 @@ async function handleMasterOutcome(env, headers, requestCode, outcome, cq) {
     `).bind(req.id, master.id).run();
   } catch (err) {
     console.error("Agree job failed:", err);
-    await answerJobsCallback(
-      env, cq.id, "❌ Не вдалося зберегти результат", true
-    );
+    await answerJobsCallback(env, cq.id, "❌ Не вдалося зберегти результат", true);
     return json({ ok: true }, headers);
   }
 
@@ -1054,23 +992,17 @@ async function handleMasterOutcome(env, headers, requestCode, outcome, cq) {
     console.error("Increment good_deals_count failed:", err);
   }
 
-  await saveEvent(
-    env, req, "master_agreed",
-    `${masterName}: домовились із клієнтом`, master
-  );
-
+  await saveEvent(env, req, "master_agreed", `${masterName}: домовились із клієнтом`, master);
   await answerJobsCallback(env, cq.id, "✅ Домовленість зафіксовано");
 
   await sendToMaster(
-    env,
-    master.telegram_id,
+    env, chatId,
     `✅ ДОМОВИЛИСЬ\n\n🆔 ${req.request_code}\n\nДомовленість зафіксовано.\n\n👉 НАСТУПНИЙ КРОК:\nКоли фактично почнете роботи — натисніть «🔧 Роботи розпочато».`,
     buildAgreedJobButtons(req.request_code)
   );
 
   await notifyAdmin(env, [
-    "ℹ️ SA-MASTER Jobs",
-    "",
+    "ℹ️ SA-MASTER Jobs", "",
     `🆔 ${req.request_code}`,
     `🙋 ${masterName}`,
     "📊 Домовились із клієнтом",
@@ -1082,21 +1014,19 @@ async function handleMasterOutcome(env, headers, requestCode, outcome, cq) {
 
 async function handleOutcomeBack(env, headers, requestCode, cq) {
   const master = await getMasterByTelegramId(env, cq.from.id);
-
   if (!master || master.status !== "active") {
     await answerJobsCallback(env, cq.id, "❌ Немає доступу", true);
     return json({ ok: true }, headers);
   }
 
   const { req, error } = await getAssignedRequest(env, requestCode, master.id);
-
   if (error) {
     await answerJobsCallback(env, cq.id, error, true);
     return json({ ok: true }, headers);
   }
 
   await answerJobsCallback(env, cq.id, "");
-  await showMyJobCard(env, master.telegram_id, master, req.request_code);
+  await showMyJobCard(env, cq.message?.chat?.id || cq.from.id, master, req.request_code);
   return json({ ok: true }, headers);
 }
 
@@ -1104,7 +1034,6 @@ async function handleOutcomeBack(env, headers, requestCode, cq) {
 
 async function handleNotAgreedReason(env, headers, requestCode, rawReason, cq) {
   const master = await getMasterByTelegramId(env, cq.from.id);
-
   if (!master || master.status !== "active") {
     await answerJobsCallback(env, cq.id, "❌ Немає доступу", true);
     return json({ ok: true }, headers);
@@ -1129,7 +1058,6 @@ async function handleNotAgreedReason(env, headers, requestCode, rawReason, cq) {
   }
 
   const { req, error } = await getAssignedRequest(env, requestCode, master.id);
-
   if (error) {
     await answerJobsCallback(env, cq.id, error, true);
     return json({ ok: true }, headers);
@@ -1142,45 +1070,40 @@ async function handleNotAgreedReason(env, headers, requestCode, rawReason, cq) {
 
   const masterName = masterDisplayName(master, cq.from);
   const needsAdminReview = reason === "client_declined";
+  const chatId = cq.message?.chat?.id || cq.from.id;
 
   try {
     if (needsAdminReview) {
       await env.DB.prepare(`
         UPDATE requests
-        SET
-          assigned_master_id = NULL,
-          assigned_master_name = NULL,
-          assigned_at = NULL,
-          transferred_to_jobs = 0,
-          updated_at = CURRENT_TIMESTAMP
+        SET assigned_master_id = NULL,
+            assigned_master_name = NULL,
+            assigned_at = NULL,
+            transferred_to_jobs = 0,
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = ? AND assigned_master_id = ?
           AND status NOT IN ('installation', 'completed', 'cancelled')
       `).bind(req.id, master.id).run();
     } else {
       await env.DB.prepare(`
         UPDATE requests
-        SET
-          assigned_master_id = NULL,
-          assigned_master_name = NULL,
-          assigned_at = NULL,
-          updated_at = CURRENT_TIMESTAMP
+        SET assigned_master_id = NULL,
+            assigned_master_name = NULL,
+            assigned_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
         WHERE id = ? AND assigned_master_id = ?
           AND status NOT IN ('installation', 'completed', 'cancelled')
       `).bind(req.id, master.id).run();
     }
   } catch (err) {
     console.error("Release not-agreed job failed:", err);
-    await answerJobsCallback(
-      env, cq.id, "❌ Не вдалося зберегти результат", true
-    );
+    await answerJobsCallback(env, cq.id, "❌ Не вдалося зберегти результат", true);
     return json({ ok: true }, headers);
   }
 
   await saveOutcome(env, req, master.id, `not_agreed_${reason}`);
-
   await saveEvent(
-    env,
-    req,
+    env, req,
     needsAdminReview ? "master_client_declined" : "master_not_agreed",
     needsAdminReview
       ? `${masterName}: клієнт відмовився / заявка неактуальна — передано адміністратору`
@@ -1192,8 +1115,7 @@ async function handleNotAgreedReason(env, headers, requestCode, rawReason, cq) {
 
   if (needsAdminReview) {
     await sendToMaster(
-      env,
-      master.telegram_id,
+      env, chatId,
       `🕓 ЗАЯВКУ ПЕРЕДАНО НА ПЕРЕВІРКУ\n\n🆔 ${req.request_code}\n📝 Причина: ${reasonLabels[reason]}\n\nЗаявка більше не закріплена за вами.`,
       [
         [{ text: "🔧 Мої заявки", callback_data: "my_jobs" }],
@@ -1204,32 +1126,22 @@ async function handleNotAgreedReason(env, headers, requestCode, rawReason, cq) {
     await notifyAdmin(
       env,
       [
-        "⚠️ SA-MASTER Jobs — ПОТРІБНА ПЕРЕВІРКА",
-        "",
+        "⚠️ SA-MASTER Jobs — ПОТРІБНА ПЕРЕВІРКА", "",
         `🆔 ${req.request_code}`,
         `🙋 Майстер: ${masterName}`,
         `👤 Клієнт: ${req.name || "—"}`,
-        `📞 ${req.phone || "—"}`,
-        "",
-        `📝 Причина: ${reasonLabels[reason]}`,
-        "",
+        `📞 ${req.phone || "—"}`, "",
+        `📝 Причина: ${reasonLabels[reason]}`, "",
         "⏸ Заявку прибрано з доступних.",
       ],
       [
-        [{
-          text: "↩️ Повернути в Jobs",
-          callback_data: `jobs_review_return:${req.request_code}`,
-        }],
-        [{
-          text: "❌ Закрити заявку",
-          callback_data: `jobs_review_close:${req.request_code}`,
-        }],
+        [{ text: "↩️ Повернути в Jobs", callback_data: `jobs_review_return:${req.request_code}` }],
+        [{ text: "❌ Закрити заявку", callback_data: `jobs_review_close:${req.request_code}` }],
       ]
     );
   } else {
     await sendToMaster(
-      env,
-      master.telegram_id,
+      env, chatId,
       `↩️ ЗАЯВКУ ПОВЕРНУТО\n\n🆔 ${req.request_code}\n\n📝 Причина: ${reasonLabels[reason]}\n\nЗаявка знову доступна іншим майстрам.`,
       [[{ text: "🏠 Головна", callback_data: "jobs_home" }]]
     );
@@ -1241,8 +1153,7 @@ async function handleNotAgreedReason(env, headers, requestCode, rawReason, cq) {
     if (fresh) await broadcastJob(env, fresh, true);
 
     await notifyAdmin(env, [
-      "ℹ️ SA-MASTER Jobs",
-      "",
+      "ℹ️ SA-MASTER Jobs", "",
       `🆔 ${req.request_code}`,
       `🙋 ${masterName}`,
       "📊 Не домовились",
@@ -1258,14 +1169,12 @@ async function handleNotAgreedReason(env, headers, requestCode, rawReason, cq) {
 
 async function handleJobStarted(env, headers, requestCode, cq) {
   const master = await getMasterByTelegramId(env, cq.from.id);
-
   if (!master || master.status !== "active") {
     await answerJobsCallback(env, cq.id, "❌ Немає доступу", true);
     return json({ ok: true }, headers);
   }
 
   const { req, error } = await getAssignedRequest(env, requestCode, master.id);
-
   if (error) {
     await answerJobsCallback(env, cq.id, error, true);
     return json({ ok: true }, headers);
@@ -1277,9 +1186,7 @@ async function handleJobStarted(env, headers, requestCode, cq) {
   }
 
   if (req.status !== "approved") {
-    await answerJobsCallback(
-      env, cq.id, "❌ Спочатку підтвердьте домовленість", true
-    );
+    await answerJobsCallback(env, cq.id, "❌ Спочатку підтвердьте домовленість", true);
     return json({ ok: true }, headers);
   }
 
@@ -1296,25 +1203,19 @@ async function handleJobStarted(env, headers, requestCode, cq) {
     }
   } catch (err) {
     console.error("Start job failed:", err);
-    await answerJobsCallback(
-      env, cq.id, "❌ Не вдалося зберегти початок робіт", true
-    );
+    await answerJobsCallback(env, cq.id, "❌ Не вдалося зберегти початок робіт", true);
     return json({ ok: true }, headers);
   }
 
   const masterName = masterDisplayName(master, cq.from);
+  const chatId = cq.message?.chat?.id || cq.from.id;
 
   await saveOutcome(env, req, master.id, "job_started");
-  await saveEvent(
-    env, req, "master_job_started",
-    `${masterName}: роботи розпочато`, master
-  );
-
+  await saveEvent(env, req, "master_job_started", `${masterName}: роботи розпочато`, master);
   await answerJobsCallback(env, cq.id, "🔧 Початок робіт зафіксовано");
 
   await sendToMaster(
-    env,
-    master.telegram_id,
+    env, chatId,
     `🔧 РОБОТИ РОЗПОЧАТО\n\n🆔 ${req.request_code}\n\n👉 НАСТУПНИЙ КРОК:\nПісля фактичного завершення натисніть «✅ Роботи завершено».`,
     buildStartedJobButtons(req.request_code)
   );
@@ -1332,14 +1233,12 @@ async function handleJobStarted(env, headers, requestCode, cq) {
 
 async function handleCooperationFailed(env, headers, requestCode, cq) {
   const master = await getMasterByTelegramId(env, cq.from.id);
-
   if (!master || master.status !== "active") {
     await answerJobsCallback(env, cq.id, "❌ Немає доступу", true);
     return json({ ok: true }, headers);
   }
 
   const { req, error } = await getAssignedRequest(env, requestCode, master.id);
-
   if (error) {
     await answerJobsCallback(env, cq.id, error, true);
     return json({ ok: true }, headers);
@@ -1347,21 +1246,16 @@ async function handleCooperationFailed(env, headers, requestCode, cq) {
 
   if (req.status !== "approved") {
     await answerJobsCallback(
-      env,
-      cq.id,
-      req.status === "installation"
-        ? "❌ Роботи вже розпочаті"
-        : "❌ Ця дія зараз недоступна",
+      env, cq.id,
+      req.status === "installation" ? "❌ Роботи вже розпочаті" : "❌ Ця дія зараз недоступна",
       true
     );
     return json({ ok: true }, headers);
   }
 
   await answerJobsCallback(env, cq.id, "");
-
   await sendToMaster(
-    env,
-    master.telegram_id,
+    env, cq.message?.chat?.id || cq.from.id,
     `↩️ СПІВПРАЦЯ НЕ ВІДБУЛАСЬ\n\n🆔 ${req.request_code}\n\nОберіть основну причину:`,
     buildMasterNotAgreedReasonButtons(req.request_code)
   );
@@ -1373,14 +1267,12 @@ async function handleCooperationFailed(env, headers, requestCode, cq) {
 
 async function handleJobCompleted(env, headers, requestCode, cq) {
   const master = await getMasterByTelegramId(env, cq.from.id);
-
   if (!master || master.status !== "active") {
     await answerJobsCallback(env, cq.id, "❌ Немає доступу", true);
     return json({ ok: true }, headers);
   }
 
   const { req, error } = await getAssignedRequest(env, requestCode, master.id);
-
   if (error) {
     await answerJobsCallback(env, cq.id, error, true);
     return json({ ok: true }, headers);
@@ -1392,9 +1284,7 @@ async function handleJobCompleted(env, headers, requestCode, cq) {
   }
 
   if (req.status !== "installation") {
-    await answerJobsCallback(
-      env, cq.id, "❌ Спочатку позначте початок робіт", true
-    );
+    await answerJobsCallback(env, cq.id, "❌ Спочатку позначте початок робіт", true);
     return json({ ok: true }, headers);
   }
 
@@ -1416,18 +1306,14 @@ async function handleJobCompleted(env, headers, requestCode, cq) {
   }
 
   const masterName = masterDisplayName(master, cq.from);
+  const chatId = cq.message?.chat?.id || cq.from.id;
 
   await saveOutcome(env, req, master.id, "job_completed");
-  await saveEvent(
-    env, req, "master_job_completed",
-    `${masterName}: роботи завершено`, master
-  );
-
+  await saveEvent(env, req, "master_job_completed", `${masterName}: роботи завершено`, master);
   await answerJobsCallback(env, cq.id, "✅ Роботи завершено");
 
   await sendToMaster(
-    env,
-    master.telegram_id,
+    env, chatId,
     `✅ РОБОТИ ЗАВЕРШЕНО\n\n🆔 ${req.request_code}\n\nЗаявку завершено. Дякуємо!`,
     [
       [{ text: "🔧 Мої заявки", callback_data: "my_jobs" }],
