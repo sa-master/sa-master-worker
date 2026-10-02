@@ -814,6 +814,34 @@ async function deleteMasterPermanently(
   }
 
   /*
+   * Не дозволяємо видалити майстра, якщо за ним ще є
+   * незавершені заявки.
+   *
+   * Інакше заявка втратить assigned_master_id і може
+   * залишитися без відповідального майстра.
+   */
+  const activeAssigned = await env.DB.prepare(`
+    SELECT
+      COUNT(*) AS count
+    FROM requests
+    WHERE assigned_master_id = ?
+      AND status NOT IN ('completed', 'cancelled')
+  `).bind(master.id).first();
+
+  const activeAssignedCount = Number(activeAssigned?.count || 0);
+
+  if (activeAssignedCount > 0) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      `❌ У майстра є активні заявки: ${activeAssignedCount}. Спочатку завершіть або поверніть їх у Jobs.`,
+      true
+    );
+
+    return false;
+  }
+
+  /*
    * Перед видаленням профілю прибираємо всі відстежувані
    * картки заявок із приватного Telegram-чату цього майстра.
    *
@@ -1962,9 +1990,12 @@ export async function handleTelegramWebhook(
         `👤 ${masterLabel}`,
         `📞 ${master.phone || "—"}`,
         "",
-        "Буде видалено профіль, анкету, статистику та відомі персональні дані майстра.",
+        "Буде видалено профіль, анкету, статистику та службові дані майстра.",
         "",
-        "Клієнтські заявки та їх історія залишаться, але прив'язка до цього майстра буде очищена.",
+        "Якщо за майстром є активні заявки, видалення буде заблоковано.",
+        "Спочатку такі заявки потрібно завершити або повернути в Jobs.",
+        "",
+        "Завершені клієнтські заявки та їх історія залишаться в системі.",
         "",
         "Цю дію неможливо скасувати.",
       ].join("\n"),
