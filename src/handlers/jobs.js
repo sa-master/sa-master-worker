@@ -724,7 +724,7 @@ export async function publishRequestToJobs(env, request) {
  * HIDDEN /jobs
  * ========================================================= */
 
-async function showAvailableJobs(env, chatId) {
+async function showAvailableJobs(env, chatId, master) {
   const rows = await env.DB.prepare(`
     SELECT *
     FROM requests
@@ -759,7 +759,16 @@ async function showAvailableJobs(env, chatId) {
   );
 
   for (const req of jobs) {
-    await sendToMaster(env, chatId, publicJobText(req), publicJobButtons(req));
+    const result = await sendToMaster(
+      env,
+      chatId,
+      publicJobText(req),
+      publicJobButtons(req)
+    );
+
+    if (result?.ok && master?.id) {
+      await rememberJobMessage(env, req, master, result);
+    }
   }
 }
 
@@ -1010,7 +1019,7 @@ export async function handleJobsWebhook(request, env, headers) {
         return json({ ok: true }, headers);
       }
 
-      await showAvailableJobs(env, chatId);
+      await showAvailableJobs(env, chatId, access.master);
       return json({ ok: true }, headers);
     }
 
@@ -1083,7 +1092,7 @@ export async function handleJobsWebhook(request, env, headers) {
     }
 
     await answerJobsCallback(env, cq.id, "");
-    await showAvailableJobs(env, chatId);
+    await showAvailableJobs(env, chatId, access.master);
     return json({ ok: true }, headers);
   }
 
