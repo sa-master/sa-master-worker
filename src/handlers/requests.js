@@ -281,6 +281,11 @@ async function showRequestCard(
     callback_data: `details:${req.request_code}`,
   }]);
 
+  buttons.push([{
+    text: "🗑 Видалити заявку",
+    callback_data: `request_delete_ask:${req.request_code}`,
+  }]);
+
   buttons.push([
     { text: "📋 До заявок", callback_data: "requests_list" },
   ]);
@@ -290,6 +295,187 @@ async function showRequestCard(
   if (callbackId) {
     await answerCallbackQuery(env, callbackId, "");
   }
+}
+
+async function showRequestDeleteConfirmation(
+  env,
+  callbackId,
+  requestCode,
+  chatId,
+  messageId
+) {
+  const req = await env.DB.prepare(`
+    SELECT *
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!req) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Заявку не знайдено",
+      true
+    );
+    return;
+  }
+
+  await editMessageText(
+    env,
+    chatId,
+    messageId,
+    [
+      "⚠️ ВИДАЛИТИ ЗАЯВКУ НАЗАВЖДИ?",
+      "",
+      `🆔 ${req.request_code}`,
+      `👤 ${req.name || "—"}`,
+      `📞 ${req.phone || "—"}`,
+      `🔧 ${req.type_label || req.type || "—"}`,
+      `📍 ${req.location || "—"}`,
+      "",
+      "Буде видалено:",
+      "• саму заявку;",
+      "• її історію подій;",
+      "• результати роботи майстрів;",
+      "• прикріплені до заявки файли.",
+      "",
+      "Картка клієнта в базі НЕ видаляється.",
+      "",
+      "Цю дію неможливо скасувати.",
+    ].join("\n"),
+    [[
+      {
+        text: "🗑 Так, видалити",
+        callback_data: `request_delete_confirm:${req.request_code}`,
+      },
+      {
+        text: "Скасувати",
+        callback_data: `request_open:${req.request_code}`,
+      },
+    ]]
+  );
+
+  if (callbackId) {
+    await answerCallbackQuery(env, callbackId, "");
+  }
+}
+
+async function deleteRequestPermanently(
+  env,
+  callbackId,
+  requestCode,
+  chatId,
+  messageId
+) {
+  const req = await env.DB.prepare(`
+    SELECT *
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!req) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Заявку не знайдено",
+      true
+    );
+    return false;
+  }
+
+  let requestFiles = [];
+
+  try {
+    const filesResult = await env.DB.prepare(`
+      SELECT storage_key
+      FROM request_files
+      WHERE request_id = ?
+    `).bind(req.id).all();
+
+    requestFiles = filesResult.results || [];
+  } catch (err) {
+    console.error("Load request files before delete failed:", err);
+  }
+
+  if (env.FILES && requestFiles.length) {
+    for (const file of requestFiles) {
+      if (!file?.storage_key) continue;
+
+      try {
+        await env.FILES.delete(file.storage_key);
+      } catch (err) {
+        console.error(
+          `R2 delete failed for ${file.storage_key}:`,
+          err
+        );
+      }
+    }
+  }
+
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`
+        DELETE FROM request_outcomes
+        WHERE request_id = ?
+      `).bind(req.id),
+
+      env.DB.prepare(`
+        DELETE FROM events
+        WHERE request_id = ?
+      `).bind(req.id),
+
+      env.DB.prepare(`
+        DELETE FROM request_files
+        WHERE request_id = ?
+      `).bind(req.id),
+
+      env.DB.prepare(`
+        DELETE FROM requests
+        WHERE id = ?
+      `).bind(req.id),
+    ]);
+  } catch (err) {
+    console.error("Permanent request delete failed:", err);
+
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Не вдалося видалити заявку",
+      true
+    );
+
+    return false;
+  }
+
+  await editMessageText(
+    env,
+    chatId,
+    messageId,
+    [
+      "🗑 ЗАЯВКУ ВИДАЛЕНО",
+      "",
+      `🆔 ${req.request_code}`,
+      "",
+      "Заявку та пов'язані з нею дані видалено з системи.",
+      "Картка клієнта залишилась у базі.",
+    ].join("\n"),
+    [[
+      {
+        text: "📋 До заявок",
+        callback_data: "requests_list",
+      },
+    ]]
+  );
+
+  await answerCallbackQuery(
+    env,
+    callbackId,
+    "🗑 Заявку видалено"
+  );
+
+  return true;
 }
 
 /* =========================================================
@@ -547,13 +733,6 @@ async function deleteMasterPermanently(
     return false;
   }
 
-  /*
-   * Єдине правило ID:
-   * request_outcomes.master_id  = masters.id
-   * requests.source_master_id   = masters.id
-   * requests.assigned_master_id = masters.id
-   * events.author_id            = masters.id (TEXT)
-   */
   const cleanupSteps = [
     {
       name: "request_outcomes",
@@ -1488,6 +1667,30 @@ export async function handleTelegramWebhook(
     return json({ ok: true }, headers);
   }
 
+  if (data.startsWith("request_delete_ask:")) {
+    await showRequestDeleteConfirmation(
+      env,
+      cq.id,
+      data.slice("request_delete_ask:".length),
+      chatId,
+      messageId
+    );
+
+    return json({ ok: true }, headers);
+  }
+
+  if (data.startsWith("request_delete_confirm:")) {
+    await deleteRequestPermanently(
+      env,
+      cq.id,
+      data.slice("request_delete_confirm:".length),
+      chatId,
+      messageId
+    );
+
+    return json({ ok: true }, headers);
+  }
+
   if (data === "masters_list") {
     await sendMastersMenu(env, chatId, messageId);
     await answerCallbackQuery(env, cq.id, "");
@@ -1920,11 +2123,6 @@ async function handleTransferToJobs(
   const delivered = Number(result.delivered || 0);
   const failed = Number(result.failed || 0);
 
-  /*
-   * publishRequestToJobs ставить transferred_to_jobs = 1 до розсилки.
-   * Якщо не доставлено жодному майстру — повертаємо заявку у стан
-   * "не передано", щоб адмін міг повторити спробу.
-   */
   if (delivered === 0) {
     try {
       await env.DB.prepare(`
@@ -2072,11 +2270,6 @@ async function handleJobsReviewReturn(
     return json({ ok: true }, headers);
   }
 
-  /*
-   * Після client_declined у jobs.js transferred_to_jobs = 0.
-   * Тому publishRequestToJobs може коректно опублікувати заявку повторно
-   * та реально розіслати її активним майстрам.
-   */
   const result = await publishRequestToJobs(env, req);
 
   if (!result.ok) {
