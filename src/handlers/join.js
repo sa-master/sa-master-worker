@@ -1,11 +1,12 @@
 import { json } from "../lib/json.js";
 import {
   sendToMaster,
-  answerJobsCallback,
+  setMasterMenu,
 } from "../lib/telegram-jobs.js";
 import {
   sendMessageWithButtons,
   editMessageText,
+  answerCallbackQuery,
 } from "../lib/telegram.js";
 
 const MASTER_STATUS = {
@@ -52,7 +53,7 @@ async function getLatestApplication(env, telegramId) {
     .first();
 }
 
-async function safeAnswerJobsCallback(
+async function safeAnswerAdminCallback(
   env,
   callbackId,
   text = "",
@@ -60,7 +61,7 @@ async function safeAnswerJobsCallback(
 ) {
   if (!callbackId) return null;
 
-  return answerJobsCallback(
+  return answerCallbackQuery(
     env,
     callbackId,
     text,
@@ -72,47 +73,27 @@ async function safeAnswerJobsCallback(
  * ГОЛОВНЕ МЕНЮ МАЙСТРА
  * ========================================================= */
 
-function buildMasterMenuButtons() {
-  return [
-    [
-      {
-        text: "📋 Доступні заявки",
-        callback_data: "jobs_list",
-      },
-    ],
-    [
-      {
-        text: "➕ Передати заявку",
-        callback_data: "submit_request",
-      },
-    ],
-  ];
-}
-
 async function sendActiveMasterMenu(env, chatId, master) {
-  const name =
-    master?.first_name
-      ? `, ${master.first_name}`
-      : "";
-
-  return sendToMaster(
+  return setMasterMenu(
     env,
     chatId,
+    null,
     [
-      `👋 Вітаю${name}!`,
-      "",
       "🔧 SA-MASTER Jobs",
+      "",
+      master?.first_name
+        ? `Вітаємо, ${master.first_name}!`
+        : "Вітаємо!",
       "",
       "Ваш профіль активний.",
       "",
-      "📋 Переглядайте доступні заявки прямо в боті.",
-      "🤝 Беріть у роботу ті, які вам підходять.",
-      "🔒 Контакти замовника відкриваються після того, як ви берете заявку.",
-      "➕ Передавайте заявки, які не можете виконати самі.",
+      "Нові доступні заявки автоматично з’являються в цьому чаті.",
       "",
-      "Оберіть дію:",
-    ].join("\n"),
-    buildMasterMenuButtons()
+      "Для керування використовуйте меню внизу:",
+      "🔧 Мої заявки — ваші активні заявки",
+      "➕ Передати — передати заявку іншому майстру",
+      "❓ Допомога — правила роботи з ботом",
+    ].join("\n")
   );
 }
 
@@ -830,7 +811,7 @@ export async function handleApplicationReview(
       .first();
 
   if (!app) {
-    await safeAnswerJobsCallback(
+    await safeAnswerAdminCallback(
       env,
       cq.id,
       "❌ Анкету не знайдено",
@@ -844,7 +825,7 @@ export async function handleApplicationReview(
   }
 
   if (app.status !== "pending") {
-    await safeAnswerJobsCallback(
+    await safeAnswerAdminCallback(
       env,
       cq.id,
       `⚠️ Вже оброблено: ${app.status}`,
@@ -889,7 +870,7 @@ export async function handleApplicationReview(
         .run();
 
     if (!rejected.meta?.changes) {
-      await safeAnswerJobsCallback(
+      await safeAnswerAdminCallback(
         env,
         cq.id,
         "⚠️ Анкету вже оброблено",
@@ -946,7 +927,7 @@ export async function handleApplicationReview(
       );
     }
 
-    await safeAnswerJobsCallback(
+    await safeAnswerAdminCallback(
       env,
       cq.id,
       "❌ Відхилено"
@@ -963,7 +944,7 @@ export async function handleApplicationReview(
    * ----------------------------------------------------- */
 
   if (action !== "approve") {
-    await safeAnswerJobsCallback(
+    await safeAnswerAdminCallback(
       env,
       cq.id,
       "❓ Невідома дія",
@@ -1002,7 +983,7 @@ export async function handleApplicationReview(
       .bind(appId)
       .run();
 
-    await safeAnswerJobsCallback(
+    await safeAnswerAdminCallback(
       env,
       cq.id,
       existingMaster.status === MASTER_STATUS.ACTIVE
@@ -1089,7 +1070,7 @@ export async function handleApplicationReview(
       );
 
     if (!raceMaster) {
-      await safeAnswerJobsCallback(
+      await safeAnswerAdminCallback(
         env,
         cq.id,
         "❌ Не вдалося створити профіль майстра",
@@ -1133,7 +1114,7 @@ export async function handleApplicationReview(
         );
 
   if (!master) {
-    await safeAnswerJobsCallback(
+    await safeAnswerAdminCallback(
       env,
       cq.id,
       "❌ Не вдалося створити профіль майстра",
@@ -1167,7 +1148,7 @@ export async function handleApplicationReview(
       err
     );
 
-    await safeAnswerJobsCallback(
+    await safeAnswerAdminCallback(
       env,
       cq.id,
       "⚠️ Профіль створено, але не вдалося оновити анкету",
@@ -1186,30 +1167,26 @@ export async function handleApplicationReview(
   }
 
   /* -------------------------------------------------------
-   * ПОВІДОМЛЕННЯ МАЙСТРУ
+   * ПОВІДОМЛЕННЯ МАЙСТРУ + ПОСТІЙНЕ НИЖНЄ МЕНЮ
    * ----------------------------------------------------- */
 
   try {
-    await sendToMaster(
+    await setMasterMenu(
       env,
       app.telegram_id,
+      null,
       [
         "✅ ВАС ПРИЙНЯТО ДО SA-MASTER Jobs!",
         "",
         "Ваш профіль активовано.",
         "",
-        "Тепер ви можете:",
+        "Нові доступні заявки автоматично з’являтимуться в цьому чаті.",
         "",
-        "📋 переглядати доступні заявки прямо в боті",
-        "🤝 брати заявки, які вам підходять",
-        "📞 отримувати контакти клієнта після взяття заявки",
-        "➕ передавати власні заявки",
-        "",
-        "Номер телефону замовника не показується іншим майстрам, доки заявку не взято в роботу.",
-        "",
-        "Оберіть дію:",
-      ].join("\n"),
-      buildMasterMenuButtons()
+        "Для керування використовуйте меню внизу:",
+        "🔧 Мої заявки — ваші активні заявки",
+        "➕ Передати — передати заявку іншому майстру",
+        "❓ Допомога — правила роботи з ботом",
+      ].join("\n")
     );
   } catch (err) {
     console.error(
@@ -1259,7 +1236,7 @@ export async function handleApplicationReview(
     }
   }
 
-  await safeAnswerJobsCallback(
+  await safeAnswerAdminCallback(
     env,
     cq.id,
     "✅ Прийнято!"
