@@ -370,8 +370,34 @@ export async function publishRequestToJobs(env, request) {
     return { ok: false, description: "REQUEST_NOT_FOUND" };
   }
 
+  let req = null;
+  let publicationClaimed = false;
+  let deliveryConfirmed = false;
+
+  async function rollbackPublicationFlag() {
+    if (!req?.id) return;
+
+    try {
+      await env.DB.prepare(`
+        UPDATE requests
+        SET
+          transferred_to_jobs = 0,
+          transferred_at = NULL,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+          AND transferred_to_jobs = 1
+          AND assigned_master_id IS NULL
+      `).bind(req.id).run();
+    } catch (rollbackErr) {
+      console.error(
+        "Publish request to Jobs rollback failed:",
+        rollbackErr
+      );
+    }
+  }
+
   try {
-    const req = request.id
+    req = request.id
       ? await env.DB.prepare(`
           SELECT * FROM requests WHERE id = ? LIMIT 1
         `).bind(request.id).first()
@@ -379,7 +405,9 @@ export async function publishRequestToJobs(env, request) {
           SELECT * FROM requests WHERE request_code = ? LIMIT 1
         `).bind(request.request_code).first();
 
-    if (!req) return { ok: false, description: "Заявку не знайдено" };
+    if (!req) {
+      return { ok: false, description: "Заявку не знайдено" };
+    }
 
     if (Number(req.transferred_to_jobs || 0) === 1) {
       return {
@@ -389,11 +417,21 @@ export async function publishRequestToJobs(env, request) {
       };
     }
 
+    /*
+     * Тимчасово займаємо право на публікацію.
+     *
+     * Це захищає від паралельної подвійної розсилки:
+     * тільки перший запит змінить transferred_to_jobs з 0 на 1.
+     *
+     * Якщо картку не отримає ЖОДЕН майстер,
+     * прапорець нижче буде відкочено назад у 0,
+     * щоб заявку можна було опублікувати повторно.
+     */
     const result = await env.DB.prepare(`
       UPDATE requests
       SET
         transferred_to_jobs = 1,
-        transferred_at = COALESCE(transferred_at, CURRENT_TIMESTAMP),
+        transferred_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
         AND COALESCE(transferred_to_jobs, 0) = 0
@@ -407,12 +445,41 @@ export async function publishRequestToJobs(env, request) {
       };
     }
 
+    publicationClaimed = true;
+
     const fresh = await env.DB.prepare(`
       SELECT * FROM requests WHERE id = ? LIMIT 1
     `).bind(req.id).first();
 
     const publishedRequest = fresh || req;
     const delivery = await broadcastJob(env, publishedRequest);
+
+    /*
+     * Публікацію вважаємо успішною лише тоді,
+     * коли картку реально отримав хоча б один майстер.
+     */
+    if (!delivery || Number(delivery.delivered || 0) < 1) {
+      await rollbackPublicationFlag();
+
+      return {
+        ok: false,
+        description: "Не вдалося доставити заявку жодному майстру",
+        request_code: req.request_code,
+        recipients: Number(delivery?.total || 0),
+        delivered: Number(delivery?.delivered || 0),
+        failed: Number(delivery?.failed || 0),
+        retryable: true,
+      };
+    }
+
+    /*
+     * Від цього моменту заявка справді опублікована.
+     * Навіть якщо подальша відправка вкладень матиме проблему,
+     * основна картка вже доставлена хоча б одному майстру,
+     * тому прапорець transferred_to_jobs не відкочуємо.
+     */
+    deliveryConfirmed = true;
+
     await broadcastRequestAttachments(env, publishedRequest);
 
     return {
@@ -423,8 +490,23 @@ export async function publishRequestToJobs(env, request) {
       failed: delivery.failed,
     };
   } catch (err) {
+    /*
+     * Якщо помилка сталася після захоплення публікації,
+     * але до підтвердженої доставки хоча б одному майстру,
+     * повертаємо заявку у стан, доступний для повторної публікації.
+     */
+    if (publicationClaimed && !deliveryConfirmed) {
+      await rollbackPublicationFlag();
+    }
+
     console.error("Publish request to Jobs failed:", err);
-    return { ok: false, description: String(err?.message || err) };
+
+    return {
+      ok: false,
+      description: String(err?.message || err),
+      request_code: req?.request_code || request?.request_code || null,
+      retryable: true,
+    };
   }
 }
 
