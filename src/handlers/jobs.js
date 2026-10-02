@@ -253,6 +253,153 @@ async function getMasterReferralLink(env, telegramId) {
 }
 
 /* =========================================================
+ * JOB MESSAGE TRACKING
+ * ========================================================= */
+
+async function rememberJobMessage(env, req, master, result) {
+  const messageId = result?.result?.message_id;
+
+  if (!req?.id || !master?.id || !master?.telegram_id || !messageId) {
+    return;
+  }
+
+  try {
+    await env.DB.prepare(`
+      INSERT OR IGNORE INTO job_messages
+      (
+        request_id,
+        request_code,
+        master_id,
+        chat_id,
+        message_id,
+        created_at
+      )
+      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `).bind(
+      req.id,
+      req.request_code || null,
+      master.id,
+      String(master.telegram_id),
+      Number(messageId)
+    ).run();
+  } catch (err) {
+    console.error("Remember Jobs message failed:", err);
+  }
+}
+
+async function getTrackedJobMessages(env, requestRef) {
+  try {
+    if (typeof requestRef === "number") {
+      const rows = await env.DB.prepare(`
+        SELECT *
+        FROM job_messages
+        WHERE request_id = ?
+        ORDER BY id ASC
+      `).bind(requestRef).all();
+
+      return rows.results || [];
+    }
+
+    const rows = await env.DB.prepare(`
+      SELECT *
+      FROM job_messages
+      WHERE request_code = ?
+      ORDER BY id ASC
+    `).bind(String(requestRef || "")).all();
+
+    return rows.results || [];
+  } catch (err) {
+    console.error("Get tracked Jobs messages failed:", err);
+    return [];
+  }
+}
+
+export async function deletePublishedRequestCards(env, requestRef) {
+  const rows = await getTrackedJobMessages(env, requestRef);
+
+  let deleted = 0;
+  let failed = 0;
+
+  for (const row of rows) {
+    try {
+      const result = await deleteMasterMessage(
+        env,
+        row.chat_id,
+        row.message_id
+      );
+
+      if (result?.ok) {
+        deleted++;
+
+        try {
+          await env.DB.prepare(`
+            DELETE FROM job_messages
+            WHERE id = ?
+          `).bind(row.id).run();
+        } catch (dbErr) {
+          console.error("Delete tracked Jobs row failed:", dbErr);
+        }
+      } else {
+        failed++;
+      }
+    } catch (err) {
+      failed++;
+      console.error(
+        `Delete Jobs card failed for ${row.chat_id}/${row.message_id}:`,
+        err
+      );
+    }
+  }
+
+  return {
+    total: rows.length,
+    deleted,
+    failed,
+  };
+}
+
+export async function clearPublishedRequestCardButtons(env, req) {
+  if (!req?.id && !req?.request_code) {
+    return { total: 0, updated: 0, failed: 0 };
+  }
+
+  const rows = await getTrackedJobMessages(
+    env,
+    req.id || req.request_code
+  );
+
+  let updated = 0;
+  let failed = 0;
+
+  for (const row of rows) {
+    try {
+      const result = await editMasterMessage(
+        env,
+        row.chat_id,
+        row.message_id,
+        publicJobText(req),
+        []
+      );
+
+      if (result?.ok) updated++;
+      else failed++;
+    } catch (err) {
+      failed++;
+      console.error(
+        `Clear Jobs card buttons failed for ${row.chat_id}/${row.message_id}:`,
+        err
+      );
+    }
+  }
+
+  return {
+    total: rows.length,
+    updated,
+    failed,
+  };
+}
+
+/* =========================================================
  * PUBLIC JOB CARD
  * ========================================================= */
 
@@ -304,8 +451,12 @@ async function broadcastJob(env, req, returned = false) {
         publicJobText(req, returned),
         publicJobButtons(req)
       );
-      if (result?.ok) delivered++;
-      else failed++;
+      if (result?.ok) {
+        delivered++;
+        await rememberJobMessage(env, req, master, result);
+      } else {
+        failed++;
+      }
     } catch (err) {
       failed++;
       console.error(`Job delivery failed for master ${master.id}:`, err);
@@ -1177,6 +1328,13 @@ async function handleTakeJob(env, headers, requestCode, cq) {
     `${masterName} взяв заявку`,
     master
   );
+
+  /*
+   * Прибираємо кнопку «🤝 Беру в роботу» з усіх
+   * розісланих карток цієї заявки, а не лише з картки
+   * майстра, який забрав заявку.
+   */
+  await clearPublishedRequestCardButtons(env, req);
 
   await answerJobsCallback(env, cq.id, "✅ Заявка ваша");
 
