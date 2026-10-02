@@ -14,8 +14,10 @@ import {
   handleAttachClient,
   handleTelegramWebhook,
 } from "./handlers/requests.js";
+
 import { handleJobsWebhook } from "./handlers/jobs.js";
 import { handleGetObject, handleUpdateObject } from "./handlers/objects.js";
+
 import {
   handleUploadRequestProject,
   handleUploadFile,
@@ -24,79 +26,278 @@ import {
 } from "./handlers/files.js";
 
 
+/* =========================================================
+ * TELEGRAM WEBHOOK SECURITY
+ * ========================================================= */
+
 function timingSafeEqualText(a, b) {
   const left = new TextEncoder().encode(String(a || ""));
   const right = new TextEncoder().encode(String(b || ""));
+
   if (left.length !== right.length) return false;
+
   let diff = 0;
-  for (let i = 0; i < left.length; i++) diff |= left[i] ^ right[i];
+
+  for (let i = 0; i < left.length; i++) {
+    diff |= left[i] ^ right[i];
+  }
+
   return diff === 0;
 }
 
-function requireTelegramWebhookSecret(request, env, secretName, headers) {
+
+function requireTelegramWebhookSecret(
+  request,
+  env,
+  secretName,
+  headers
+) {
   const expected = env?.[secretName];
+
   if (!expected) {
     console.error(`Missing required secret: ${secretName}`);
-    return error("Webhook security is not configured", headers, 503);
+
+    return error(
+      "Webhook security is not configured",
+      headers,
+      503
+    );
   }
 
-  const received = request.headers.get("X-Telegram-Bot-Api-Secret-Token") || "";
+  const received =
+    request.headers.get(
+      "X-Telegram-Bot-Api-Secret-Token"
+    ) || "";
+
   if (!timingSafeEqualText(received, expected)) {
-    return error("Forbidden", headers, 403);
+    return error(
+      "Forbidden",
+      headers,
+      403
+    );
   }
 
   return null;
 }
 
+
+/* =========================================================
+ * PUBLIC ROUTES
+ * ========================================================= */
+
 const PUBLIC_ROUTES = [
-  ["GET",  /^\/$/,                            handleHealth,                { auth: false }],
-  ["POST", /^\/$/,                            handleCreateRequest,         { auth: false }],
-  ["GET",  /^\/calculator-request\/([^/]+)$/, handleGetCalculatorRequest, { auth: false }],
-  ["POST", /^\/request\/([^/]+)\/project$/,   handleUploadRequestProject, { auth: false }],
-  ["POST", /^\/telegram-webhook$/,            handleTelegramWebhook,      { auth: false }],
-  ["POST", /^\/jobs-webhook$/,                handleJobsWebhook,          { auth: false }],
+
+  [
+    "GET",
+    /^\/$/,
+    handleHealth,
+    { auth: false }
+  ],
+
+  [
+    "POST",
+    /^\/$/,
+    handleCreateRequest,
+    { auth: false }
+  ],
+
+  [
+    "GET",
+    /^\/calculator-request\/([^/]+)$/,
+    handleGetCalculatorRequest,
+    { auth: false }
+  ],
+
+  [
+    "POST",
+    /^\/request\/([^/]+)\/project$/,
+    handleUploadRequestProject,
+    { auth: false }
+  ],
+
+  [
+    "POST",
+    /^\/telegram-webhook$/,
+    handleTelegramWebhook,
+    { auth: false }
+  ],
+
+  [
+    "POST",
+    /^\/jobs-webhook$/,
+    handleJobsWebhook,
+    { auth: false }
+  ],
+
 ];
 
+
+/* =========================================================
+ * ADMIN ROUTES
+ * ========================================================= */
+
 const ADMIN_ROUTES = [
-  ["GET",   /^\/requests$/,                     handleListRequests,   { auth: true }],
-  ["GET",   /^\/request\/([^/]+)$/,             handleGetRequest,     { auth: true }],
-  ["POST",  /^\/request\/([^/]+)\/status$/,     handleUpdateStatus,   { auth: true }],
-  ["GET",   /^\/request\/([^/]+)\/events$/,     handleGetEvents,      { auth: true }],
-  ["POST",  /^\/request\/([^/]+)\/client$/,     handleAttachClient,   { auth: true }],
-  ["GET",   /^\/object\/([^/]+)$/,              handleGetObject,      { auth: true }],
-  ["PATCH", /^\/object\/([^/]+)$/,              handleUpdateObject,   { auth: true }],
-  ["POST",  /^\/object\/([^/]+)\/file$/,        handleUploadFile,     { auth: true }],
-  ["GET",   /^\/object\/([^/]+)\/files$/,       handleListFiles,      { auth: true }],
-  ["GET",   /^\/object\/([^/]+)\/file\/(\d+)$/, handleDownloadFile,   { auth: true }],
+
+  [
+    "GET",
+    /^\/requests$/,
+    handleListRequests,
+    { auth: true }
+  ],
+
+  [
+    "GET",
+    /^\/request\/([^/]+)$/,
+    handleGetRequest,
+    { auth: true }
+  ],
+
+  [
+    "POST",
+    /^\/request\/([^/]+)\/status$/,
+    handleUpdateStatus,
+    { auth: true }
+  ],
+
+  [
+    "GET",
+    /^\/request\/([^/]+)\/events$/,
+    handleGetEvents,
+    { auth: true }
+  ],
+
+  [
+    "POST",
+    /^\/request\/([^/]+)\/client$/,
+    handleAttachClient,
+    { auth: true }
+  ],
+
+  [
+    "GET",
+    /^\/object\/([^/]+)$/,
+    handleGetObject,
+    { auth: true }
+  ],
+
+  [
+    "PATCH",
+    /^\/object\/([^/]+)$/,
+    handleUpdateObject,
+    { auth: true }
+  ],
+
+  [
+    "POST",
+    /^\/object\/([^/]+)\/file$/,
+    handleUploadFile,
+    { auth: true }
+  ],
+
+  [
+    "GET",
+    /^\/object\/([^/]+)\/files$/,
+    handleListFiles,
+    { auth: true }
+  ],
+
+  [
+    "GET",
+    /^\/object\/([^/]+)\/file\/(\d+)$/,
+    handleDownloadFile,
+    { auth: true }
+  ],
+
 ];
+
+
+/* =========================================================
+ * ROUTERS
+ * ========================================================= */
 
 const routePublic = createRouter(PUBLIC_ROUTES);
 const routeAdmin = createRouter(ADMIN_ROUTES);
 
+
+/* =========================================================
+ * WORKER
+ * ========================================================= */
+
 export default {
+
   async fetch(request, env, ctx) {
-    if (request.method === "OPTIONS") return preflight();
+
+    /* -----------------------------------------------------
+     * CORS preflight
+     * ----------------------------------------------------- */
+
+    if (request.method === "OPTIONS") {
+      return preflight();
+    }
+
 
     const headers = corsHeaders();
     const url = new URL(request.url);
 
+
     try {
-      const pub = await routePublic(request, url);
+
+      /* ===================================================
+       * PUBLIC ROUTES
+       * =================================================== */
+
+      const pub = await routePublic(
+        request,
+        url
+      );
+
 
       if (pub) {
-        if (url.pathname === "/telegram-webhook") {
-          const webhookError = requireTelegramWebhookSecret(
-            request, env, "TELEGRAM_WEBHOOK_SECRET", headers
-          );
-          if (webhookError) return webhookError;
-        }
+
+        /*
+         * ВАЖЛИВО:
+         *
+         * /telegram-webhook
+         *
+         * НЕ перевіряємо через TELEGRAM_WEBHOOK_SECRET,
+         * тому що в поточній конфігурації адмін-бота
+         * такого Secret немає.
+         *
+         * Telegram callback-и адмін-бота повинні
+         * безпосередньо потрапляти в:
+         *
+         * handleTelegramWebhook()
+         */
+
+
+        /*
+         * SA-MASTER Jobs webhook.
+         *
+         * Для Jobs перевірка Secret залишається,
+         * оскільки JOBS_WEBHOOK_SECRET використовується
+         * поточною конфігурацією Jobs-бота.
+         */
 
         if (url.pathname === "/jobs-webhook") {
-          const webhookError = requireTelegramWebhookSecret(
-            request, env, "JOBS_WEBHOOK_SECRET", headers
-          );
-          if (webhookError) return webhookError;
+
+          const webhookError =
+            requireTelegramWebhookSecret(
+              request,
+              env,
+              "JOBS_WEBHOOK_SECRET",
+              headers
+            );
+
+          if (webhookError) {
+            return webhookError;
+          }
+
         }
+
+
+        /*
+         * Викликаємо знайдений public handler.
+         */
 
         return await pub.handler(
           request,
@@ -106,14 +307,34 @@ export default {
           url,
           ctx
         );
+
       }
 
-      const admin = await routeAdmin(request, url);
+
+      /* ===================================================
+       * ADMIN API ROUTES
+       * =================================================== */
+
+      const admin = await routeAdmin(
+        request,
+        url
+      );
+
 
       if (admin) {
-        const authError = requireAuth(request, env, headers);
 
-        if (authError) return authError;
+        const authError =
+          requireAuth(
+            request,
+            env,
+            headers
+          );
+
+
+        if (authError) {
+          return authError;
+        }
+
 
         return await admin.handler(
           request,
@@ -123,17 +344,40 @@ export default {
           url,
           ctx
         );
+
       }
 
-      return error("Not found", headers, 404);
+
+      /* ===================================================
+       * 404
+       * =================================================== */
+
+      return error(
+        "Not found",
+        headers,
+        404
+      );
+
     } catch (err) {
-      console.error("Unhandled error:", err);
+
+      /* ===================================================
+       * GLOBAL ERROR HANDLER
+       * =================================================== */
+
+      console.error(
+        "Unhandled error:",
+        err
+      );
+
 
       return error(
         err?.message || String(err),
         headers,
         500
       );
+
     }
+
   },
+
 };
