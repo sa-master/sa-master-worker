@@ -82,6 +82,107 @@ function requireTelegramWebhookSecret(
 
 
 /* =========================================================
+ * ONE-TIME JOBS WEBHOOK SETUP
+ * ========================================================= */
+
+async function handleSetupJobsWebhook(
+  request,
+  env,
+  headers
+) {
+  if (!env.JOBS_BOT_TOKEN) {
+    return error(
+      "JOBS_BOT_TOKEN is not configured",
+      headers,
+      503
+    );
+  }
+
+  if (!env.JOBS_WEBHOOK_SECRET) {
+    return error(
+      "JOBS_WEBHOOK_SECRET is not configured",
+      headers,
+      503
+    );
+  }
+
+  const webhookUrl =
+    "https://sa-master-worker.c6hht469s9.workers.dev/jobs-webhook";
+
+  try {
+    const response = await fetch(
+      `https://api.telegram.org/bot${env.JOBS_BOT_TOKEN}/setWebhook`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          url: webhookUrl,
+          secret_token: env.JOBS_WEBHOOK_SECRET,
+          allowed_updates: [
+            "message",
+            "callback_query",
+          ],
+        }),
+      }
+    );
+
+    const result = await response.json();
+
+    if (!result?.ok) {
+      console.error(
+        "Telegram setWebhook failed:",
+        result
+      );
+
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          telegram: result,
+        }),
+        {
+          status: 502,
+          headers: {
+            ...headers,
+            "Content-Type": "application/json; charset=UTF-8",
+          },
+        }
+      );
+    }
+
+    return new Response(
+      JSON.stringify({
+        ok: true,
+        message: "SA-MASTER Jobs webhook configured",
+        webhook_url: webhookUrl,
+        telegram: result,
+      }),
+      {
+        status: 200,
+        headers: {
+          ...headers,
+          "Content-Type": "application/json; charset=UTF-8",
+        },
+      }
+    );
+
+  } catch (err) {
+    console.error(
+      "Jobs webhook setup failed:",
+      err
+    );
+
+    return error(
+      err?.message || String(err),
+      headers,
+      500
+    );
+  }
+}
+
+
+/* =========================================================
  * PUBLIC ROUTES
  * ========================================================= */
 
@@ -137,6 +238,21 @@ const PUBLIC_ROUTES = [
  * ========================================================= */
 
 const ADMIN_ROUTES = [
+
+  /*
+   * ONE-TIME ROUTE
+   *
+   * Використовується лише для реєстрації
+   * захищеного webhook SA-MASTER Jobs.
+   *
+   * Після успішного налаштування видалимо.
+   */
+  [
+    "POST",
+    /^\/setup-jobs-webhook$/,
+    handleSetupJobsWebhook,
+    { auth: true }
+  ],
 
   [
     "GET",
@@ -255,27 +371,19 @@ export default {
       if (pub) {
 
         /*
-         * ВАЖЛИВО:
-         *
-         * /telegram-webhook
-         *
-         * НЕ перевіряємо через TELEGRAM_WEBHOOK_SECRET,
-         * тому що в поточній конфігурації адмін-бота
-         * такого Secret немає.
-         *
-         * Telegram callback-и адмін-бота повинні
-         * безпосередньо потрапляти в:
-         *
-         * handleTelegramWebhook()
+         * Основний Telegram webhook поки працює
+         * без окремого webhook secret.
          */
-
 
         /*
          * SA-MASTER Jobs webhook.
          *
-         * Для Jobs перевірка Secret залишається,
-         * оскільки JOBS_WEBHOOK_SECRET використовується
-         * поточною конфігурацією Jobs-бота.
+         * Telegram повинен передавати:
+         *
+         * X-Telegram-Bot-Api-Secret-Token
+         *
+         * Значення повинно збігатися з
+         * JOBS_WEBHOOK_SECRET у Cloudflare.
          */
 
         if (url.pathname === "/jobs-webhook") {
@@ -294,10 +402,6 @@ export default {
 
         }
 
-
-        /*
-         * Викликаємо знайдений public handler.
-         */
 
         return await pub.handler(
           request,
