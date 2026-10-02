@@ -65,7 +65,13 @@ async function rememberMasterUiMessage(env, chatId, result) {
   return result;
 }
 
-export async function sendToMaster(env, chatId, text, inlineKeyboard = null) {
+export async function sendToMaster(
+  env,
+  chatId,
+  text,
+  inlineKeyboard = null,
+  options = {}
+) {
   const payload = {
     chat_id: chatId,
     text,
@@ -74,6 +80,10 @@ export async function sendToMaster(env, chatId, text, inlineKeyboard = null) {
 
   if (inlineKeyboard) {
     payload.reply_markup = { inline_keyboard: inlineKeyboard };
+  }
+
+  if (options?.protectContent) {
+    payload.protect_content = true;
   }
 
   return callJobsBot(env, "sendMessage", payload);
@@ -216,7 +226,12 @@ export async function sendFileToJobsGroup(env, { name, fileType, bytes, caption 
   }
 }
 
-export async function sendFileToMaster(env, chatId, { name, fileType, bytes, caption = "" }) {
+export async function sendFileToMaster(
+  env,
+  chatId,
+  { name, fileType, bytes, caption = "" },
+  options = {}
+) {
   if (!env.JOBS_BOT_TOKEN || !chatId) {
     return { ok: false, description: "JOBS_BOT_TOKEN або chatId не встановлено" };
   }
@@ -225,6 +240,11 @@ export async function sendFileToMaster(env, chatId, { name, fileType, bytes, cap
     const form = new FormData();
     form.append("chat_id", String(chatId));
     if (caption) form.append("caption", caption);
+
+    if (options?.protectContent) {
+      form.append("protect_content", "true");
+    }
+
     form.append(
       "document",
       new Blob([bytes], { type: fileType || "application/octet-stream" }),
