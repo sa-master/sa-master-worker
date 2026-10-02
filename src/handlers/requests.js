@@ -20,7 +20,7 @@ import {
 import {
   sendToMaster,
 } from "../lib/telegram-jobs.js";
-import { publishRequestToJobs } from "./jobs.js";
+import { publishRequestToJobs, deletePublishedRequestCards } from "./jobs.js";
 
 const CURRENT_YEAR = 2026;
 const ESTIMATE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -414,6 +414,27 @@ async function deleteRequestPermanently(
     }
   }
 
+  /*
+   * Видаляємо розіслані картки цієї заявки з приватних
+   * чатів майстрів. Якщо окреме Telegram-повідомлення вже
+   * недоступне для видалення, це не блокує видалення самої
+   * заявки з системи.
+   */
+  try {
+    const cardsCleanup = await deletePublishedRequestCards(
+      env,
+      req.id
+    );
+
+    if (cardsCleanup.failed) {
+      console.warn(
+        `Jobs cards cleanup: ${cardsCleanup.deleted} deleted, ${cardsCleanup.failed} failed`
+      );
+    }
+  } catch (err) {
+    console.error("Jobs cards cleanup before request delete failed:", err);
+  }
+
   try {
     await env.DB.batch([
       env.DB.prepare(`
@@ -428,6 +449,11 @@ async function deleteRequestPermanently(
 
       env.DB.prepare(`
         DELETE FROM request_files
+        WHERE request_id = ?
+      `).bind(req.id),
+
+      env.DB.prepare(`
+        DELETE FROM job_messages
         WHERE request_id = ?
       `).bind(req.id),
 
