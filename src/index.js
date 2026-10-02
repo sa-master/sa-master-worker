@@ -16,7 +16,10 @@ import {
 } from "./handlers/requests.js";
 
 import { handleJobsWebhook } from "./handlers/jobs.js";
-import { handleGetObject, handleUpdateObject } from "./handlers/objects.js";
+import {
+  handleGetObject,
+  handleUpdateObject,
+} from "./handlers/objects.js";
 
 import {
   handleUploadRequestProject,
@@ -34,7 +37,9 @@ function timingSafeEqualText(a, b) {
   const left = new TextEncoder().encode(String(a || ""));
   const right = new TextEncoder().encode(String(b || ""));
 
-  if (left.length !== right.length) return false;
+  if (left.length !== right.length) {
+    return false;
+  }
 
   let diff = 0;
 
@@ -55,7 +60,9 @@ function requireTelegramWebhookSecret(
   const expected = env?.[secretName];
 
   if (!expected) {
-    console.error(`Missing required secret: ${secretName}`);
+    console.error(
+      `Missing required secret: ${secretName}`
+    );
 
     return error(
       "Webhook security is not configured",
@@ -82,119 +89,6 @@ function requireTelegramWebhookSecret(
 
 
 /* =========================================================
- * ONE-TIME MAIN TELEGRAM WEBHOOK SETUP
- * TEMPORARY ROUTE — REMOVE AFTER SUCCESS
- * ========================================================= */
-
-async function handleSetupTelegramWebhook(
-  request,
-  env,
-  headers
-) {
-  if (!env.BOT_TOKEN) {
-    return error(
-      "BOT_TOKEN is not configured",
-      headers,
-      503
-    );
-  }
-
-  if (!env.TELEGRAM_WEBHOOK_SECRET) {
-    return error(
-      "TELEGRAM_WEBHOOK_SECRET is not configured",
-      headers,
-      503
-    );
-  }
-
-  const webhookUrl =
-    "https://sa-master-worker.c6hht469s9.workers.dev/telegram-webhook";
-
-  try {
-    const response = await fetch(
-      `https://api.telegram.org/bot${env.BOT_TOKEN}/setWebhook`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          url: webhookUrl,
-          secret_token: env.TELEGRAM_WEBHOOK_SECRET,
-          allowed_updates: [
-            "message",
-            "callback_query",
-          ],
-        }),
-      }
-    );
-
-    const result = await response.json();
-
-    if (!result?.ok) {
-      console.error(
-        "Telegram main setWebhook failed:",
-        result
-      );
-
-      return new Response(
-        JSON.stringify(
-          {
-            ok: false,
-            telegram: result,
-          },
-          null,
-          2
-        ),
-        {
-          status: 502,
-          headers: {
-            ...headers,
-            "Content-Type":
-              "application/json; charset=UTF-8",
-          },
-        }
-      );
-    }
-
-    return new Response(
-      JSON.stringify(
-        {
-          ok: true,
-          message:
-            "Main Telegram webhook configured",
-          webhook_url: webhookUrl,
-          telegram: result,
-        },
-        null,
-        2
-      ),
-      {
-        status: 200,
-        headers: {
-          ...headers,
-          "Content-Type":
-            "application/json; charset=UTF-8",
-        },
-      }
-    );
-
-  } catch (err) {
-    console.error(
-      "Main Telegram webhook setup failed:",
-      err
-    );
-
-    return error(
-      err?.message || String(err),
-      headers,
-      500
-    );
-  }
-}
-
-
-/* =========================================================
  * PUBLIC ROUTES
  * ========================================================= */
 
@@ -204,57 +98,42 @@ const PUBLIC_ROUTES = [
     "GET",
     /^\/$/,
     handleHealth,
-    { auth: false }
+    { auth: false },
   ],
 
   [
     "POST",
     /^\/$/,
     handleCreateRequest,
-    { auth: false }
+    { auth: false },
   ],
 
   [
     "GET",
     /^\/calculator-request\/([^/]+)$/,
     handleGetCalculatorRequest,
-    { auth: false }
+    { auth: false },
   ],
 
   [
     "POST",
     /^\/request\/([^/]+)\/project$/,
     handleUploadRequestProject,
-    { auth: false }
+    { auth: false },
   ],
 
   [
     "POST",
     /^\/telegram-webhook$/,
     handleTelegramWebhook,
-    { auth: false }
+    { auth: false },
   ],
 
   [
     "POST",
     /^\/jobs-webhook$/,
     handleJobsWebhook,
-    { auth: false }
-  ],
-
-  /*
-   * ТИМЧАСОВИЙ МАРШРУТ.
-   *
-   * Потрібен лише один раз для реєстрації
-   * захищеного webhook основного Telegram-бота.
-   *
-   * Після успішної перевірки видалимо.
-   */
-  [
-    "GET",
-    /^\/setup-telegram-webhook$/,
-    handleSetupTelegramWebhook,
-    { auth: false }
+    { auth: false },
   ],
 
 ];
@@ -270,70 +149,70 @@ const ADMIN_ROUTES = [
     "GET",
     /^\/requests$/,
     handleListRequests,
-    { auth: true }
+    { auth: true },
   ],
 
   [
     "GET",
     /^\/request\/([^/]+)$/,
     handleGetRequest,
-    { auth: true }
+    { auth: true },
   ],
 
   [
     "POST",
     /^\/request\/([^/]+)\/status$/,
     handleUpdateStatus,
-    { auth: true }
+    { auth: true },
   ],
 
   [
     "GET",
     /^\/request\/([^/]+)\/events$/,
     handleGetEvents,
-    { auth: true }
+    { auth: true },
   ],
 
   [
     "POST",
     /^\/request\/([^/]+)\/client$/,
     handleAttachClient,
-    { auth: true }
+    { auth: true },
   ],
 
   [
     "GET",
     /^\/object\/([^/]+)$/,
     handleGetObject,
-    { auth: true }
+    { auth: true },
   ],
 
   [
     "PATCH",
     /^\/object\/([^/]+)$/,
     handleUpdateObject,
-    { auth: true }
+    { auth: true },
   ],
 
   [
     "POST",
     /^\/object\/([^/]+)\/file$/,
     handleUploadFile,
-    { auth: true }
+    { auth: true },
   ],
 
   [
     "GET",
     /^\/object\/([^/]+)\/files$/,
     handleListFiles,
-    { auth: true }
+    { auth: true },
   ],
 
   [
     "GET",
     /^\/object\/([^/]+)\/file\/(\d+)$/,
     handleDownloadFile,
-    { auth: true }
+    { auth: true },
   ],
 
 ];
@@ -343,8 +222,11 @@ const ADMIN_ROUTES = [
  * ROUTERS
  * ========================================================= */
 
-const routePublic = createRouter(PUBLIC_ROUTES);
-const routeAdmin = createRouter(ADMIN_ROUTES);
+const routePublic =
+  createRouter(PUBLIC_ROUTES);
+
+const routeAdmin =
+  createRouter(ADMIN_ROUTES);
 
 
 /* =========================================================
@@ -355,12 +237,17 @@ export default {
 
   async fetch(request, env, ctx) {
 
+    /* -----------------------------------------------------
+     * CORS PREFLIGHT
+     * ----------------------------------------------------- */
+
     if (request.method === "OPTIONS") {
       return preflight();
     }
 
     const headers = corsHeaders();
     const url = new URL(request.url);
+
 
     try {
 
@@ -375,9 +262,9 @@ export default {
 
       if (pub) {
 
-        /*
-         * Основний Telegram webhook.
-         */
+        /* -----------------------------------------------
+         * MAIN TELEGRAM BOT
+         * ----------------------------------------------- */
 
         if (
           url.pathname ===
@@ -398,9 +285,9 @@ export default {
         }
 
 
-        /*
-         * SA-MASTER Jobs webhook.
-         */
+        /* -----------------------------------------------
+         * SA-MASTER JOBS BOT
+         * ----------------------------------------------- */
 
         if (
           url.pathname ===
@@ -421,6 +308,10 @@ export default {
         }
 
 
+        /* -----------------------------------------------
+         * RUN PUBLIC HANDLER
+         * ----------------------------------------------- */
+
         return await pub.handler(
           request,
           env,
@@ -433,7 +324,7 @@ export default {
 
 
       /* ===================================================
-       * ADMIN API ROUTES
+       * ADMIN ROUTES
        * =================================================== */
 
       const admin = await routeAdmin(
@@ -454,6 +345,7 @@ export default {
           return authError;
         }
 
+
         return await admin.handler(
           request,
           env,
@@ -465,13 +357,22 @@ export default {
       }
 
 
+      /* ===================================================
+       * NOT FOUND
+       * =================================================== */
+
       return error(
         "Not found",
         headers,
         404
       );
 
+
     } catch (err) {
+
+      /* ===================================================
+       * GLOBAL ERROR HANDLER
+       * =================================================== */
 
       console.error(
         "Unhandled error:",
