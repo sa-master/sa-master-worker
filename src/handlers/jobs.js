@@ -555,14 +555,19 @@ async function broadcastRequestAttachments(env, req) {
       const isPhoto = file.uploaded_by === "master_photo";
 
       for (const master of mastersResult.results || []) {
-        await sendFileToMaster(env, master.telegram_id, {
-          name: file.name,
-          fileType: file.file_type,
-          bytes,
-          caption: isPhoto
-            ? `📷 Фото об’єкта · ${req.request_code}`
-            : `📐 Дизайн-проєкт · ${req.request_code}`,
-        });
+        await sendFileToMaster(
+          env,
+          master.telegram_id,
+          {
+            name: file.name,
+            fileType: file.file_type,
+            bytes,
+            caption: isPhoto
+              ? `📷 Фото об’єкта · ${req.request_code}`
+              : `📐 Дизайн-проєкт · ${req.request_code}`,
+          },
+          { protectContent: true }
+        );
       }
     }
   } catch (err) {
@@ -855,7 +860,8 @@ async function showMyJobCard(env, chatId, master, requestCode) {
       env,
       chatId,
       base.join("\n"),
-      buildStartedJobButtons(req.request_code)
+      buildStartedJobButtons(req.request_code),
+      { protectContent: true }
     );
   }
 
@@ -868,7 +874,8 @@ async function showMyJobCard(env, chatId, master, requestCode) {
       env,
       chatId,
       base.join("\n"),
-      buildAgreedJobButtons(req.request_code)
+      buildAgreedJobButtons(req.request_code),
+      { protectContent: true }
     );
   }
 
@@ -882,7 +889,8 @@ async function showMyJobCard(env, chatId, master, requestCode) {
     env,
     chatId,
     base.join("\n"),
-    buildContactButtons(req.request_code, req.phone)
+    buildContactButtons(req.request_code, req.phone),
+    { protectContent: true }
   );
 }
 
@@ -1340,7 +1348,8 @@ async function handleTakeJob(env, headers, requestCode, cq) {
       env,
       masterChatId,
       privateText,
-      buildContactButtons(req.request_code, req.phone)
+      buildContactButtons(req.request_code, req.phone),
+      { protectContent: true }
     );
   } catch (err) {
     console.error("TAKE JOB: sendToMaster threw:", err);
