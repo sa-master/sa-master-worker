@@ -719,9 +719,6 @@ export async function publishRequestToJobs(env, request) {
   }
 }
 
-export async function publishRequestToJobsGroup(env, request) {
-  return publishRequestToJobs(env, request);
-}
 
 /* =========================================================
  * HIDDEN /jobs
