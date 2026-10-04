@@ -256,6 +256,101 @@ async function getMasterReferralLink(env, telegramId) {
  * JOB MESSAGE TRACKING
  * ========================================================= */
 
+async function ensurePrivateJobMessagesTable(env) {
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS job_private_messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id INTEGER NOT NULL,
+      request_code TEXT,
+      master_id INTEGER,
+      chat_id TEXT NOT NULL,
+      message_id INTEGER NOT NULL,
+      message_kind TEXT NOT NULL DEFAULT 'private',
+      created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(chat_id, message_id)
+    )
+  `).run();
+
+  await env.DB.prepare(`
+    CREATE INDEX IF NOT EXISTS idx_job_private_messages_request_id
+    ON job_private_messages(request_id)
+  `).run();
+}
+
+async function rememberPrivateJobMessage(
+  env,
+  req,
+  master,
+  result,
+  messageKind = "private"
+) {
+  const messageId = result?.result?.message_id;
+  const chatId =
+    result?.result?.chat?.id ??
+    master?.telegram_id ??
+    null;
+
+  if (!req?.id || chatId == null || !messageId) {
+    return;
+  }
+
+  try {
+    await ensurePrivateJobMessagesTable(env);
+
+    await env.DB.prepare(`
+      INSERT OR IGNORE INTO job_private_messages (
+        request_id,
+        request_code,
+        master_id,
+        chat_id,
+        message_id,
+        message_kind,
+        created_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `).bind(
+      req.id,
+      req.request_code || null,
+      master?.id || null,
+      String(chatId),
+      Number(messageId),
+      String(messageKind || "private")
+    ).run();
+  } catch (err) {
+    console.error("Remember private Jobs message failed:", err);
+  }
+}
+
+async function getTrackedPrivateJobMessages(env, requestRef) {
+  try {
+    await ensurePrivateJobMessagesTable(env);
+
+    if (typeof requestRef === "number") {
+      const rows = await env.DB.prepare(`
+        SELECT *
+        FROM job_private_messages
+        WHERE request_id = ?
+        ORDER BY id ASC
+      `).bind(requestRef).all();
+
+      return rows.results || [];
+    }
+
+    const rows = await env.DB.prepare(`
+      SELECT *
+      FROM job_private_messages
+      WHERE request_code = ?
+      ORDER BY id ASC
+    `).bind(String(requestRef || "")).all();
+
+    return rows.results || [];
+  } catch (err) {
+    console.error("Get private Jobs messages failed:", err);
+    return [];
+  }
+}
+
+
 async function rememberJobMessage(env, req, master, result) {
   const messageId = result?.result?.message_id;
 
@@ -315,12 +410,13 @@ async function getTrackedJobMessages(env, requestRef) {
 }
 
 export async function deletePublishedRequestCards(env, requestRef) {
-  const rows = await getTrackedJobMessages(env, requestRef);
+  const publicRows = await getTrackedJobMessages(env, requestRef);
+  const privateRows = await getTrackedPrivateJobMessages(env, requestRef);
 
   let deleted = 0;
   let failed = 0;
 
-  for (const row of rows) {
+  for (const row of publicRows) {
     try {
       const result = await deleteMasterMessage(
         env,
@@ -330,29 +426,50 @@ export async function deletePublishedRequestCards(env, requestRef) {
 
       if (result?.ok) {
         deleted++;
-
-        try {
-          await env.DB.prepare(`
-            DELETE FROM job_messages
-            WHERE id = ?
-          `).bind(row.id).run();
-        } catch (dbErr) {
-          console.error("Delete tracked Jobs row failed:", dbErr);
-        }
+        await env.DB.prepare(`
+          DELETE FROM job_messages
+          WHERE id = ?
+        `).bind(row.id).run();
       } else {
         failed++;
       }
     } catch (err) {
       failed++;
       console.error(
-        `Delete Jobs card failed for ${row.chat_id}/${row.message_id}:`,
+        `Delete public Jobs card failed for ${row.chat_id}/${row.message_id}:`,
+        err
+      );
+    }
+  }
+
+  for (const row of privateRows) {
+    try {
+      const result = await deleteMasterMessage(
+        env,
+        row.chat_id,
+        row.message_id
+      );
+
+      if (result?.ok) {
+        deleted++;
+        await env.DB.prepare(`
+          DELETE FROM job_private_messages
+          WHERE id = ?
+        `).bind(row.id).run();
+      } else {
+        failed++;
+      }
+    } catch (err) {
+      failed++;
+      console.error(
+        `Delete private Jobs message failed for ${row.chat_id}/${row.message_id}:`,
         err
       );
     }
   }
 
   return {
-    total: rows.length,
+    total: publicRows.length + privateRows.length,
     deleted,
     failed,
   };
@@ -466,61 +583,81 @@ async function broadcastJob(env, req, returned = false) {
   return { total: masters.length, delivered, failed };
 }
 
-async function broadcastRequestAttachments(env, req) {
-  if (!req?.id || !env.FILES) return;
+async function sendRequestAttachmentsToMaster(env, req, master) {
+  if (!req?.id || !master?.telegram_id || !env.FILES) {
+    return { total: 0, delivered: 0, failed: 0 };
+  }
 
   try {
-    const [mastersResult, filesResult] = await Promise.all([
-      env.DB.prepare(`
-        SELECT id, telegram_id
-        FROM masters
-        WHERE status = 'active'
-          AND telegram_id IS NOT NULL
-        ORDER BY id ASC
-      `).all(),
-      env.DB.prepare(`
-        SELECT name, file_type, storage_key, uploaded_by
-        FROM request_files
-        WHERE request_id = ?
-        ORDER BY id ASC
-      `).bind(req.id).all(),
-    ]);
+    const filesResult = await env.DB.prepare(`
+      SELECT name, file_type, storage_key, uploaded_by
+      FROM request_files
+      WHERE request_id = ?
+      ORDER BY id ASC
+    `).bind(req.id).all();
 
     const files = filesResult.results || [];
-    if (!files.length) return;
+    let delivered = 0;
+    let failed = 0;
 
     for (const file of files) {
-      const stored = await env.FILES.get(file.storage_key);
-      if (!stored) continue;
+      try {
+        const stored = await env.FILES.get(file.storage_key);
 
-      const bytes = await stored.arrayBuffer();
-      const isPhoto = file.uploaded_by === "master_photo";
+        if (!stored) {
+          failed++;
+          continue;
+        }
 
-      for (const master of mastersResult.results || []) {
-        const fileResult = await sendFileToMaster(env, master.telegram_id, {
-          name: file.name,
-          fileType: file.file_type,
-          bytes,
-          caption: isPhoto
-            ? `📷 Фото об’єкта · ${req.request_code}`
-            : `📐 Дизайн-проєкт · ${req.request_code}`,
-        });
+        const bytes = await stored.arrayBuffer();
 
-        if (fileResult?.ok && fileResult?.result?.message_id) {
-          await rememberJobMessage(
+        const result = await sendFileToMaster(
+          env,
+          master.telegram_id,
+          {
+            name: file.name,
+            fileType: file.file_type,
+            bytes,
+            caption:
+              file.uploaded_by === "master_photo"
+                ? `📷 Фото / відео об’єкта · ${req.request_code}`
+                : `📐 Файл / проєкт · ${req.request_code}`,
+          }
+        );
+
+        if (result?.ok) {
+          delivered++;
+          await rememberPrivateJobMessage(
             env,
             req,
-            {
-              id: master.id || master.telegram_id,
-              telegram_id: master.telegram_id,
-            },
-            fileResult
+            master,
+            result,
+            "attachment"
+          );
+        } else {
+          failed++;
+          console.error(
+            "Send accepted request attachment failed:",
+            result?.description || result
           );
         }
+      } catch (err) {
+        failed++;
+        console.error(
+          `Send accepted request attachment failed for ${file.storage_key}:`,
+          err
+        );
       }
     }
+
+    return {
+      total: files.length,
+      delivered,
+      failed,
+    };
   } catch (err) {
-    console.error("Jobs request attachments broadcast failed:", err);
+    console.error("Load accepted request attachments failed:", err);
+    return { total: 0, delivered: 0, failed: 1 };
   }
 }
 
@@ -642,8 +779,6 @@ export async function publishRequestToJobs(env, request) {
      * тому прапорець transferred_to_jobs не відкочуємо.
      */
     deliveryConfirmed = true;
-
-    await broadcastRequestAttachments(env, publishedRequest);
 
     return {
       ok: true,
@@ -1194,6 +1329,152 @@ export async function handleJobsWebhook(request, env, headers) {
   return json({ ok: true }, headers);
 }
 
+function safeRequestDetails(req) {
+  if (!req?.request_details) return {};
+
+  try {
+    const parsed =
+      typeof req.request_details === "string"
+        ? JSON.parse(req.request_details)
+        : req.request_details;
+
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function humanValue(value) {
+  const labels = {
+    yes: "Так",
+    no: "Ні",
+    unknown: "Не визначено",
+    planned: "Планується",
+    design: "Є дизайн-проєкт",
+    plan: "Є план / креслення",
+    developing: "Ще в розробці",
+    none: "Немає",
+    apartment: "Квартира",
+    house: "Будинок",
+    complex: "Комплексний монтаж",
+    separate: "Окремі роботи",
+    tee: "Трійникова",
+    radial: "Променева",
+    floor: "Тепла підлога",
+    radiators: "Радіатори",
+    combined: "Комбінована",
+    asap: "Якнайшвидше",
+    days: "Протягом кількох днів",
+    week: "Протягом тижня",
+    month: "Протягом місяця",
+    "1_3_months": "Через 1–3 місяці",
+  };
+
+  if (Array.isArray(value)) {
+    return value.map(humanValue).filter(Boolean).join(", ");
+  }
+
+  if (value === true) return "Так";
+  if (value === false) return "Ні";
+  if (value === null || value === undefined || value === "") return "";
+
+  const s = String(value);
+  return labels[s] || s;
+}
+
+function buildPrivateRequestDetails(req) {
+  const d = safeRequestDetails(req);
+
+  const labels = {
+    new_build: "Новобудова",
+    house_area: "Площа будинку",
+    documentation: "Документація",
+    work_description: "Опис робіт",
+    bathrooms: "Санвузлів",
+    water_distribution: "Водорозведення",
+    heating_system: "Система опалення",
+    heating_change: "Зміни опалення",
+    heating_distribution: "Розведення опалення",
+    gas: "Газ",
+    heat_source: "Джерело тепла",
+    water_supply: "Водопостачання",
+    wastewater: "Водовідведення",
+    central_hot_water: "Централізоване ГВП",
+    recirculation: "Рециркуляція ГВП",
+    hot_water_source: "Приготування гарячої води",
+    water_treatment: "Водоочистка",
+    ac_drain: "Дренаж кондиціонерів",
+    ac_drain_points: "Точок дренажу кондиціонерів",
+    sewer_risers: "Каналізаційні стояки",
+    built_in_mixers: "Вбудовані змішувачі",
+    built_in_mixers_count: "Кількість вбудованих змішувачів",
+    bath_fill: "Наповнення ванни",
+    question: "Питання",
+    consultation_type: "Тип консультації",
+  };
+
+  const skip = new Set([
+    "transfer_consent",
+    "timing_code",
+    "unresolved_items",
+    "unresolved_action",
+  ]);
+
+  const rows = [];
+
+  for (const [key, value] of Object.entries(d)) {
+    if (skip.has(key)) continue;
+
+    const rendered = humanValue(value);
+    if (!rendered) continue;
+
+    rows.push(`${labels[key] || key}: ${rendered}`);
+  }
+
+  return rows;
+}
+
+function buildAcceptedRequestText(req) {
+  const details = buildPrivateRequestDetails(req);
+
+  return [
+    `✅ ВИ ВЗЯЛИ ЗАЯВКУ ${req.request_code}`,
+    "",
+    `👤 Клієнт: ${req.name || "—"}`,
+    `📞 Телефон: ${req.phone || "—"}`,
+    `🔧 Роботи: ${req.type_label || req.type || "—"}`,
+    req.object_type
+      ? `🏠 Об’єкт: ${humanValue(req.object_type)}`
+      : null,
+    req.location
+      ? `📍 Локація: ${req.location}`
+      : null,
+    req.address
+      ? `🏡 Точна адреса: ${req.address}`
+      : null,
+    req.timing
+      ? `🗓 Початок: ${req.timing}`
+      : null,
+    req.project
+      ? `📐 Документація: ${req.project}`
+      : null,
+    req.notes
+      ? `📝 Опис: ${String(req.notes).replace(/^Опис роботи:\s*/i, "")}`
+      : null,
+    details.length
+      ? ["", "📋 ДОДАТКОВА ІНФОРМАЦІЯ", ...details].join("\n")
+      : null,
+    "",
+    "👉 ЗАРАЗ ПОТРІБНО:",
+    "1. Зв'язатися із замовником.",
+    "2. Після розмови натиснути «✅ Я зв'язався» та вказати результат.",
+    "",
+    "Заявка збережена у «🔧 Мої заявки».",
+  ].filter(Boolean).join("\n");
+}
+
 /* =========================================================
  * TAKE JOB
  * ========================================================= */
@@ -1262,24 +1543,7 @@ async function handleTakeJob(env, headers, requestCode, cq) {
     return json({ ok: true }, headers);
   }
 
-  const privateText = [
-    `✅ ВИ ВЗЯЛИ ЗАЯВКУ ${req.request_code}`,
-    "",
-    `👤 Клієнт: ${req.name || "—"}`,
-    `📞 Телефон: ${req.phone || "—"}`,
-    `🔧 Роботи: ${req.type_label || req.type || "—"}`,
-    `📍 Об'єкт: ${req.location || "—"}`,
-    req.timing ? `🗓 Початок: ${req.timing}` : null,
-    req.notes
-      ? `📝 Опис: ${String(req.notes).replace(/^Опис роботи:\s*/i, "")}`
-      : null,
-    "",
-    "👉 ЗАРАЗ ПОТРІБНО:",
-    "1. Зв'язатися із замовником.",
-    "2. Після розмови натиснути «✅ Я зв'язався» та вказати результат.",
-    "",
-    "Заявка збережена у «🔧 Мої заявки».",
-  ].filter(Boolean).join("\n");
+  const privateText = buildAcceptedRequestText(req);
 
   let delivery;
 
@@ -1333,10 +1597,6 @@ async function handleTakeJob(env, headers, requestCode, cq) {
     return json({ ok: true }, headers);
   }
 
-  // Відстежуємо також приватну картку "ВИ ВЗЯЛИ ЗАЯВКУ",
-  // щоб повне видалення заявки могло прибрати і її.
-  await rememberJobMessage(env, req, master, delivery);
-
   await saveEvent(
     env,
     req,
@@ -1351,6 +1611,20 @@ async function handleTakeJob(env, headers, requestCode, cq) {
    * майстра, який забрав заявку.
    */
   await clearPublishedRequestCardButtons(env, req);
+
+  await rememberPrivateJobMessage(
+    env,
+    req,
+    master,
+    delivery,
+    "accepted"
+  );
+
+  await sendRequestAttachmentsToMaster(
+    env,
+    req,
+    master
+  );
 
   await answerJobsCallback(env, cq.id, "✅ Заявка ваша");
 
