@@ -381,68 +381,10 @@ export async function clearPublishedRequestCardButtons(env, req) {
         []
       );
 
-      if (result?.ok) {
-        updated++;
-
-        try {
-          await env.DB.prepare(`
-            UPDATE job_messages
-            SET
-              buttons_removed_at = CURRENT_TIMESTAMP,
-              last_update_status = 'ok',
-              last_update_error = NULL
-            WHERE id = ?
-          `).bind(row.id).run();
-        } catch (statusErr) {
-          console.error(
-            `Save Jobs card update status failed for row ${row.id}:`,
-            statusErr
-          );
-        }
-      } else {
-        failed++;
-
-        const description = String(
-          result?.description || "Telegram edit failed"
-        );
-
-        try {
-          await env.DB.prepare(`
-            UPDATE job_messages
-            SET
-              last_update_status = 'failed',
-              last_update_error = ?
-            WHERE id = ?
-          `).bind(description, row.id).run();
-        } catch (statusErr) {
-          console.error(
-            `Save Jobs card failure status failed for row ${row.id}:`,
-            statusErr
-          );
-        }
-      }
+      if (result?.ok) updated++;
+      else failed++;
     } catch (err) {
       failed++;
-
-      const description = String(
-        err?.message || err || "Unknown error"
-      );
-
-      try {
-        await env.DB.prepare(`
-          UPDATE job_messages
-          SET
-            last_update_status = 'failed',
-            last_update_error = ?
-          WHERE id = ?
-        `).bind(description, row.id).run();
-      } catch (statusErr) {
-        console.error(
-          `Save Jobs card exception status failed for row ${row.id}:`,
-          statusErr
-        );
-      }
-
       console.error(
         `Clear Jobs card buttons failed for ${row.chat_id}/${row.message_id}:`,
         err
@@ -530,7 +472,7 @@ async function broadcastRequestAttachments(env, req) {
   try {
     const [mastersResult, filesResult] = await Promise.all([
       env.DB.prepare(`
-        SELECT telegram_id
+        SELECT id, telegram_id
         FROM masters
         WHERE status = 'active'
           AND telegram_id IS NOT NULL
@@ -555,19 +497,26 @@ async function broadcastRequestAttachments(env, req) {
       const isPhoto = file.uploaded_by === "master_photo";
 
       for (const master of mastersResult.results || []) {
-        await sendFileToMaster(
-          env,
-          master.telegram_id,
-          {
-            name: file.name,
-            fileType: file.file_type,
-            bytes,
-            caption: isPhoto
-              ? `📷 Фото об’єкта · ${req.request_code}`
-              : `📐 Дизайн-проєкт · ${req.request_code}`,
-          },
-          { protectContent: true }
-        );
+        const fileResult = await sendFileToMaster(env, master.telegram_id, {
+          name: file.name,
+          fileType: file.file_type,
+          bytes,
+          caption: isPhoto
+            ? `📷 Фото об’єкта · ${req.request_code}`
+            : `📐 Дизайн-проєкт · ${req.request_code}`,
+        });
+
+        if (fileResult?.ok && fileResult?.result?.message_id) {
+          await rememberJobMessage(
+            env,
+            req,
+            {
+              id: master.id || master.telegram_id,
+              telegram_id: master.telegram_id,
+            },
+            fileResult
+          );
+        }
       }
     }
   } catch (err) {
@@ -724,12 +673,15 @@ export async function publishRequestToJobs(env, request) {
   }
 }
 
+export async function publishRequestToJobsGroup(env, request) {
+  return publishRequestToJobs(env, request);
+}
 
 /* =========================================================
  * HIDDEN /jobs
  * ========================================================= */
 
-async function showAvailableJobs(env, chatId, master) {
+async function showAvailableJobs(env, chatId) {
   const rows = await env.DB.prepare(`
     SELECT *
     FROM requests
@@ -764,16 +716,7 @@ async function showAvailableJobs(env, chatId, master) {
   );
 
   for (const req of jobs) {
-    const result = await sendToMaster(
-      env,
-      chatId,
-      publicJobText(req),
-      publicJobButtons(req)
-    );
-
-    if (result?.ok && master?.id) {
-      await rememberJobMessage(env, req, master, result);
-    }
+    await sendToMaster(env, chatId, publicJobText(req), publicJobButtons(req));
   }
 }
 
@@ -860,8 +803,7 @@ async function showMyJobCard(env, chatId, master, requestCode) {
       env,
       chatId,
       base.join("\n"),
-      buildStartedJobButtons(req.request_code),
-      { protectContent: true }
+      buildStartedJobButtons(req.request_code)
     );
   }
 
@@ -874,8 +816,7 @@ async function showMyJobCard(env, chatId, master, requestCode) {
       env,
       chatId,
       base.join("\n"),
-      buildAgreedJobButtons(req.request_code),
-      { protectContent: true }
+      buildAgreedJobButtons(req.request_code)
     );
   }
 
@@ -889,8 +830,7 @@ async function showMyJobCard(env, chatId, master, requestCode) {
     env,
     chatId,
     base.join("\n"),
-    buildContactButtons(req.request_code, req.phone),
-    { protectContent: true }
+    buildContactButtons(req.request_code, req.phone)
   );
 }
 
@@ -1027,7 +967,7 @@ export async function handleJobsWebhook(request, env, headers) {
         return json({ ok: true }, headers);
       }
 
-      await showAvailableJobs(env, chatId, access.master);
+      await showAvailableJobs(env, chatId);
       return json({ ok: true }, headers);
     }
 
@@ -1100,7 +1040,7 @@ export async function handleJobsWebhook(request, env, headers) {
     }
 
     await answerJobsCallback(env, cq.id, "");
-    await showAvailableJobs(env, chatId, access.master);
+    await showAvailableJobs(env, chatId);
     return json({ ok: true }, headers);
   }
 
@@ -1348,8 +1288,7 @@ async function handleTakeJob(env, headers, requestCode, cq) {
       env,
       masterChatId,
       privateText,
-      buildContactButtons(req.request_code, req.phone),
-      { protectContent: true }
+      buildContactButtons(req.request_code, req.phone)
     );
   } catch (err) {
     console.error("TAKE JOB: sendToMaster threw:", err);
@@ -1393,6 +1332,10 @@ async function handleTakeJob(env, headers, requestCode, cq) {
 
     return json({ ok: true }, headers);
   }
+
+  // Відстежуємо також приватну картку "ВИ ВЗЯЛИ ЗАЯВКУ",
+  // щоб повне видалення заявки могло прибрати і її.
+  await rememberJobMessage(env, req, master, delivery);
 
   await saveEvent(
     env,
@@ -1941,30 +1884,6 @@ async function handleJobCompleted(env, headers, requestCode, cq) {
     `${masterName}: роботи завершено`,
     master
   );
-
-  /*
-   * Після завершення робіт прибираємо всі публічні
-   * картки цієї заявки з чатів майстрів.
-   * Фінальне повідомлення майстру нижче не відстежується
-   * у job_messages і залишається в його чаті.
-   */
-  try {
-    const cardsCleanup = await deletePublishedRequestCards(
-      env,
-      req.id
-    );
-
-    if (cardsCleanup.failed) {
-      console.warn(
-        `Completed Jobs cards cleanup: ${cardsCleanup.deleted} deleted, ${cardsCleanup.failed} failed`
-      );
-    }
-  } catch (err) {
-    console.error(
-      "Completed Jobs cards cleanup failed:",
-      err
-    );
-  }
 
   await answerJobsCallback(env, cq.id, "✅ Роботи завершено");
 
