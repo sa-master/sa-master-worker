@@ -23,7 +23,7 @@ import {
   getJobsChatMember,
   sendToMaster,
 } from "../lib/telegram-jobs.js";
-import { publishRequestToJobs } from "./jobs.js";
+import { publishRequestToJobs, deletePublishedRequestCards } from "./jobs.js";
 
 const CURRENT_YEAR = 2026;
 const ESTIMATE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -462,6 +462,11 @@ async function showRequestCard(
     callback_data: `details:${req.request_code}`,
   }]);
 
+  buttons.push([{
+    text: "🗑 Видалити заявку",
+    callback_data: `request_delete_ask:${req.request_code}`,
+  }]);
+
   buttons.push([
     { text: "📋 До заявок", callback_data: "requests_list" },
   ]);
@@ -475,6 +480,218 @@ async function showRequestCard(
   );
 
   await answerCallbackQuery(env, callbackId, "");
+}
+
+
+async function askDeleteRequest(
+  env,
+  callbackId,
+  requestCode,
+  chatId,
+  messageId
+) {
+  const req = await env.DB.prepare(`
+    SELECT id, request_code, name, phone
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!req) {
+    await answerCallbackQuery(env, callbackId, "❌ Заявку не знайдено", true);
+    return false;
+  }
+
+  await editMessageText(
+    env,
+    chatId,
+    messageId,
+    [
+      "⚠️ ВИДАЛИТИ ЗАЯВКУ НАЗАВЖДИ?",
+      "",
+      `🆔 ${req.request_code}`,
+      `👤 ${req.name || "—"}`,
+      `📞 ${req.phone || "—"}`,
+      "",
+      "Буде видалено заявку, її історію, Telegram-прив’язку, розіслані картки майстрам і прикріплені до заявки файли.",
+      "",
+      "Картка клієнта залишиться в базі.",
+      "",
+      "Цю дію неможливо скасувати.",
+    ].join("\n"),
+    [[
+      {
+        text: "🗑 Так, видалити",
+        callback_data: `request_delete_confirm:${req.request_code}`,
+      },
+      {
+        text: "Скасувати",
+        callback_data: `request_open:${req.request_code}`,
+      },
+    ]]
+  );
+
+  await answerCallbackQuery(env, callbackId, "");
+  return true;
+}
+
+async function deleteRequestPermanently(
+  env,
+  callbackId,
+  requestCode,
+  chatId,
+  messageId
+) {
+  const req = await env.DB.prepare(`
+    SELECT *
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!req) {
+    await answerCallbackQuery(env, callbackId, "❌ Заявку не знайдено", true);
+    return false;
+  }
+
+  // 1. Спочатку прибираємо ВСІ відстежувані повідомлення заявки у майстрів.
+  // Якщо хоча б одне не вдалося видалити, D1 не очищаємо, щоб не втратити message_id для повторної спроби.
+  try {
+    const cardsCleanup = await deletePublishedRequestCards(env, req.id);
+
+    if (Number(cardsCleanup?.failed || 0) > 0) {
+      await answerCallbackQuery(
+        env,
+        callbackId,
+        `❌ Не видалено Telegram-карток: ${cardsCleanup.failed}. Спробуйте ще раз.`,
+        true
+      );
+      return false;
+    }
+  } catch (err) {
+    console.error("Jobs cards cleanup before request delete failed:", err);
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Не вдалося очистити Telegram-картки",
+      true
+    );
+    return false;
+  }
+
+  // 2. Отримуємо список R2-файлів до очищення request_files.
+  let requestFiles = [];
+  try {
+    const filesResult = await env.DB.prepare(`
+      SELECT storage_key
+      FROM request_files
+      WHERE request_id = ?
+    `).bind(req.id).all();
+
+    requestFiles = filesResult.results || [];
+  } catch (err) {
+    console.error("Load request files before delete failed:", err);
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Не вдалося отримати список файлів заявки",
+      true
+    );
+    return false;
+  }
+
+  // 3. Видаляємо фізичні файли з R2.
+  if (env.FILES && requestFiles.length) {
+    for (const file of requestFiles) {
+      if (!file?.storage_key) continue;
+      try {
+        await env.FILES.delete(file.storage_key);
+      } catch (err) {
+        console.error(`R2 delete failed for ${file.storage_key}:`, err);
+        await answerCallbackQuery(
+          env,
+          callbackId,
+          "❌ Не вдалося видалити файл заявки. Спробуйте ще раз.",
+          true
+        );
+        return false;
+      }
+    }
+  }
+
+  // 4. Лише після Telegram і R2 очищаємо всі записи заявки в D1.
+  try {
+    await ensureTelegramTrackingTables(env);
+
+    await env.DB.batch([
+      env.DB.prepare(`
+        DELETE FROM request_telegram_bindings
+        WHERE request_id = ?
+      `).bind(req.id),
+
+      env.DB.prepare(`
+        DELETE FROM request_telegram_tokens
+        WHERE request_id = ?
+      `).bind(req.id),
+
+      env.DB.prepare(`
+        DELETE FROM request_outcomes
+        WHERE request_id = ?
+      `).bind(req.id),
+
+      env.DB.prepare(`
+        DELETE FROM events
+        WHERE request_id = ?
+      `).bind(req.id),
+
+      env.DB.prepare(`
+        DELETE FROM request_files
+        WHERE request_id = ?
+      `).bind(req.id),
+
+      env.DB.prepare(`
+        DELETE FROM job_messages
+        WHERE request_id = ?
+      `).bind(req.id),
+
+      env.DB.prepare(`
+        DELETE FROM requests
+        WHERE id = ?
+      `).bind(req.id),
+    ]);
+  } catch (err) {
+    console.error("Permanent request delete failed:", err);
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Не вдалося видалити заявку з D1",
+      true
+    );
+    return false;
+  }
+
+  await editMessageText(
+    env,
+    chatId,
+    messageId,
+    [
+      "🗑 ЗАЯВКУ ВИДАЛЕНО",
+      "",
+      `🆔 ${req.request_code}`,
+      "",
+      "Заявку та пов’язані з нею дані видалено.",
+      "Картка клієнта залишилась у базі.",
+    ].join("\n"),
+    [[
+      {
+        text: "📋 До заявок",
+        callback_data: "requests_list",
+      },
+    ]]
+  );
+
+  await answerCallbackQuery(env, callbackId, "🗑 Заявку видалено");
+  return true;
 }
 
 /* =========================================================
@@ -2120,6 +2337,40 @@ export async function handleTelegramWebhook(
     );
   }
 
+  if (
+    data.startsWith("request_delete_ask:")
+  ) {
+    await askDeleteRequest(
+      env,
+      cq.id,
+      data.slice("request_delete_ask:".length),
+      chatId,
+      messageId
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  if (
+    data.startsWith("request_delete_confirm:")
+  ) {
+    await deleteRequestPermanently(
+      env,
+      cq.id,
+      data.slice("request_delete_confirm:".length),
+      chatId,
+      messageId
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
   if (data === "masters_list") {
     await sendMastersMenu(
       env,
@@ -2681,6 +2932,12 @@ async function handleTelegramStatusUpdate(
     text: "ℹ️ Деталі",
     callback_data:
       `details:${req.request_code}`,
+  }]);
+
+  buttons.push([{
+    text: "🗑 Видалити заявку",
+    callback_data:
+      `request_delete_ask:${req.request_code}`,
   }]);
 
   buttons.push([
