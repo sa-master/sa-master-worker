@@ -29,6 +29,19 @@ const CURRENT_YEAR = 2026;
 const ESTIMATE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const UPLOAD_LINK_TTL_MS = 2 * 60 * 60 * 1000;
 
+
+function requestAllowsMasterTransfer(req) {
+  if (!req?.request_details) return false;
+  try {
+    const details = typeof req.request_details === "string"
+      ? JSON.parse(req.request_details)
+      : req.request_details;
+    return details?.transfer_consent === "yes";
+  } catch {
+    return false;
+  }
+}
+
 const TELEGRAM_LINK_TTL_MS = 24 * 60 * 60 * 1000;
 const TELEGRAM_BOT_USERNAME = "sa_master_pro_bot";
 
@@ -437,9 +450,9 @@ async function showRequestCard(
     )
   );
 
-  if (!req.transferred_to_jobs) {
+  if (!req.transferred_to_jobs && requestAllowsMasterTransfer(req)) {
     buttons.push([{
-      text: "🤝 Передати в канал",
+      text: "🤝 Передати майстрам",
       callback_data: `transfer_to_jobs:${req.request_code}`,
     }]);
   }
@@ -1286,10 +1299,19 @@ export async function handleCreateRequest(request, env, headers) {
     )
   );
 
-  buttons.push([{
-    text: "🤝 Передати майстрам",
-    callback_data: `transfer_to_jobs:${requestCode}`,
-  }]);
+  if (requestDetails) {
+    let parsedRequestDetails = null;
+    try {
+      parsedRequestDetails = JSON.parse(requestDetails);
+    } catch {}
+
+    if (parsedRequestDetails?.transfer_consent === "yes") {
+      buttons.push([{
+        text: "🤝 Передати майстрам",
+        callback_data: `transfer_to_jobs:${requestCode}`,
+      }]);
+    }
+  }
 
   const tg = await sendMessageWithButtons(env, text, buttons);
 
@@ -2654,9 +2676,9 @@ async function handleTelegramStatusUpdate(
     )
   );
 
-  if (!req.transferred_to_jobs) {
+  if (!req.transferred_to_jobs && requestAllowsMasterTransfer(req)) {
     buttons.push([{
-      text: "🤝 Передати в канал",
+      text: "🤝 Передати майстрам",
       callback_data:
         `transfer_to_jobs:${req.request_code}`,
     }]);
@@ -2720,6 +2742,20 @@ async function handleTransferToJobs(
       env,
       cq.id,
       "❌ Заявку не знайдено",
+      true
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  if (!requestAllowsMasterTransfer(req)) {
+    await answerCallbackQuery(
+      env,
+      cq.id,
+      "⛔ Клієнт не дозволив передавати заявку майстрам",
       true
     );
 
