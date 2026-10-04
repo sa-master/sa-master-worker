@@ -23,7 +23,7 @@ import {
   getJobsChatMember,
   sendToMaster,
 } from "../lib/telegram-jobs.js";
-import { publishRequestToJobsGroup } from "./jobs.js";
+import { publishRequestToJobs } from "./jobs.js";
 
 const CURRENT_YEAR = 2026;
 const ESTIMATE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -2773,7 +2773,7 @@ async function handleTransferToJobs(
   }
 
   const result =
-    await publishRequestToJobsGroup(
+    await publishRequestToJobs(
       env,
       req
     );
