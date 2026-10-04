@@ -23,7 +23,7 @@ import {
   getJobsChatMember,
   sendToMaster,
 } from "../lib/telegram-jobs.js";
-import { publishRequestToJobs, deletePublishedRequestCards } from "./jobs.js";
+import { publishRequestToJobs } from "./jobs.js";
 
 const CURRENT_YEAR = 2026;
 const ESTIMATE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -41,139 +41,6 @@ function requestAllowsMasterTransfer(req) {
     return false;
   }
 }
-
-const TELEGRAM_LINK_TTL_MS = 24 * 60 * 60 * 1000;
-const TELEGRAM_BOT_USERNAME = "sa_master_pro_bot";
-
-async function ensureTelegramTrackingTables(env) {
-  await env.DB.batch([
-    env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS request_telegram_tokens (
-        token TEXT PRIMARY KEY,
-        request_id INTEGER NOT NULL,
-        expires_at TEXT NOT NULL,
-        consumed_at TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-      )
-    `),
-    env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS request_telegram_bindings (
-        request_id INTEGER PRIMARY KEY,
-        telegram_user_id TEXT NOT NULL,
-        telegram_chat_id TEXT NOT NULL,
-        linked_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-      )
-    `),
-  ]);
-}
-
-async function sendClientTelegram(env, chatId, text, buttons = null) {
-  if (!env.BOT_TOKEN || chatId == null) return { ok: false };
-
-  const payload = {
-    chat_id: chatId,
-    text,
-    disable_web_page_preview: true,
-  };
-
-  if (buttons?.length) {
-    payload.reply_markup = { inline_keyboard: buttons };
-  }
-
-  try {
-    const response = await fetch(
-      `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      }
-    );
-    return await response.json();
-  } catch (err) {
-    console.error("Client Telegram send failed:", err);
-    return { ok: false };
-  }
-}
-
-async function notifyRequestClient(env, requestId, text, buttons = null) {
-  try {
-    await ensureTelegramTrackingTables(env);
-    const binding = await env.DB.prepare(`
-      SELECT telegram_chat_id
-      FROM request_telegram_bindings
-      WHERE request_id = ?
-      LIMIT 1
-    `).bind(requestId).first();
-
-    if (!binding?.telegram_chat_id) return false;
-    const result = await sendClientTelegram(env, binding.telegram_chat_id, text, buttons);
-    return Boolean(result?.ok);
-  } catch (err) {
-    console.error("Client notification failed:", err);
-    return false;
-  }
-}
-
-async function bindTelegramRequest(env, msg, token) {
-  await ensureTelegramTrackingTables(env);
-
-  const row = await env.DB.prepare(`
-    SELECT t.token, t.request_id, t.expires_at, t.consumed_at, r.request_code
-    FROM request_telegram_tokens t
-    JOIN requests r ON r.id = t.request_id
-    WHERE t.token = ?
-    LIMIT 1
-  `).bind(token).first();
-
-  if (!row || row.consumed_at || new Date(row.expires_at).getTime() <= Date.now()) {
-    await sendClientTelegram(
-      env,
-      msg.chat?.id,
-      "Посилання для підключення заявки недійсне або вже використане."
-    );
-    return false;
-  }
-
-  const telegramUserId = String(msg.from?.id || "");
-  const telegramChatId = String(msg.chat?.id || "");
-  if (!telegramUserId || !telegramChatId) return false;
-
-  await env.DB.batch([
-    env.DB.prepare(`
-      INSERT INTO request_telegram_bindings (
-        request_id, telegram_user_id, telegram_chat_id, linked_at, updated_at
-      ) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-      ON CONFLICT(request_id) DO UPDATE SET
-        telegram_user_id = excluded.telegram_user_id,
-        telegram_chat_id = excluded.telegram_chat_id,
-        updated_at = CURRENT_TIMESTAMP
-    `).bind(row.request_id, telegramUserId, telegramChatId),
-    env.DB.prepare(`
-      UPDATE request_telegram_tokens
-      SET consumed_at = CURRENT_TIMESTAMP
-      WHERE token = ? AND consumed_at IS NULL
-    `).bind(token),
-    env.DB.prepare(`
-      INSERT INTO events (object_id, request_id, event_type, content, author_type)
-      VALUES (NULL, ?, 'telegram_linked', 'Клієнт підключив статус заявки в Telegram', 'client')
-    `).bind(row.request_id),
-  ]);
-
-  await sendClientTelegram(
-    env,
-    telegramChatId,
-    [
-      "Заявку підключено ✅",
-      `№ ${row.request_code}`,
-      "",
-      "Тут ви отримуватимете інформацію про її статус.",
-    ].join("\n")
-  );
-  return true;
-}
-
 
 /* =========================================================
  * ADMIN: helpers
@@ -462,11 +329,6 @@ async function showRequestCard(
     callback_data: `details:${req.request_code}`,
   }]);
 
-  buttons.push([{
-    text: "🗑 Видалити заявку",
-    callback_data: `request_delete_ask:${req.request_code}`,
-  }]);
-
   buttons.push([
     { text: "📋 До заявок", callback_data: "requests_list" },
   ]);
@@ -480,237 +342,6 @@ async function showRequestCard(
   );
 
   await answerCallbackQuery(env, callbackId, "");
-}
-
-
-async function askDeleteRequest(
-  env,
-  callbackId,
-  requestCode,
-  chatId,
-  messageId
-) {
-  const req = await env.DB.prepare(`
-    SELECT id, request_code, name, phone
-    FROM requests
-    WHERE request_code = ?
-    LIMIT 1
-  `).bind(requestCode).first();
-
-  if (!req) {
-    await answerCallbackQuery(env, callbackId, "❌ Заявку не знайдено", true);
-    return false;
-  }
-
-  await editMessageText(
-    env,
-    chatId,
-    messageId,
-    [
-      "⚠️ ВИДАЛИТИ ЗАЯВКУ НАЗАВЖДИ?",
-      "",
-      `🆔 ${req.request_code}`,
-      `👤 ${req.name || "—"}`,
-      `📞 ${req.phone || "—"}`,
-      "",
-      "Буде видалено заявку, її історію, Telegram-прив’язку, розіслані картки майстрам і прикріплені до заявки файли.",
-      "",
-      "Картка клієнта залишиться в базі.",
-      "",
-      "Цю дію неможливо скасувати.",
-    ].join("\n"),
-    [[
-      {
-        text: "🗑 Так, видалити",
-        callback_data: `request_delete_confirm:${req.request_code}`,
-      },
-      {
-        text: "Скасувати",
-        callback_data: `request_open:${req.request_code}`,
-      },
-    ]]
-  );
-
-  await answerCallbackQuery(env, callbackId, "");
-  return true;
-}
-
-async function deleteRequestPermanently(
-  env,
-  callbackId,
-  requestCode,
-  chatId,
-  messageId
-) {
-  const req = await env.DB.prepare(`
-    SELECT *
-    FROM requests
-    WHERE request_code = ?
-    LIMIT 1
-  `).bind(requestCode).first();
-
-  if (!req) {
-    await answerCallbackQuery(env, callbackId, "❌ Заявку не знайдено", true);
-    return false;
-  }
-
-  // 1. Спочатку прибираємо ВСІ відстежувані повідомлення заявки у майстрів.
-  // Якщо хоча б одне не вдалося видалити, D1 не очищаємо, щоб не втратити message_id для повторної спроби.
-  try {
-    const cardsCleanup = await deletePublishedRequestCards(env, req.id);
-
-    if (Number(cardsCleanup?.failed || 0) > 0) {
-      await answerCallbackQuery(
-        env,
-        callbackId,
-        `❌ Не видалено Telegram-карток: ${cardsCleanup.failed}. Спробуйте ще раз.`,
-        true
-      );
-      return false;
-    }
-  } catch (err) {
-    console.error("Jobs cards cleanup before request delete failed:", err);
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      "❌ Не вдалося очистити Telegram-картки",
-      true
-    );
-    return false;
-  }
-
-  // 2. Отримуємо список R2-файлів до очищення request_files.
-  let requestFiles = [];
-  try {
-    const filesResult = await env.DB.prepare(`
-      SELECT storage_key
-      FROM request_files
-      WHERE request_id = ?
-    `).bind(req.id).all();
-
-    requestFiles = filesResult.results || [];
-  } catch (err) {
-    console.error("Load request files before delete failed:", err);
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      "❌ Не вдалося отримати список файлів заявки",
-      true
-    );
-    return false;
-  }
-
-  // 3. Видаляємо фізичні файли з R2.
-  if (env.FILES && requestFiles.length) {
-    for (const file of requestFiles) {
-      if (!file?.storage_key) continue;
-      try {
-        await env.FILES.delete(file.storage_key);
-      } catch (err) {
-        console.error(`R2 delete failed for ${file.storage_key}:`, err);
-        await answerCallbackQuery(
-          env,
-          callbackId,
-          "❌ Не вдалося видалити файл заявки. Спробуйте ще раз.",
-          true
-        );
-        return false;
-      }
-    }
-  }
-
-  // 4. Лише після Telegram і R2 очищаємо всі записи заявки в D1.
-  try {
-    await ensureTelegramTrackingTables(env);
-
-    await env.DB.prepare(`
-      CREATE TABLE IF NOT EXISTS job_private_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        request_id INTEGER NOT NULL,
-        request_code TEXT,
-        master_id INTEGER,
-        chat_id TEXT NOT NULL,
-        message_id INTEGER NOT NULL,
-        message_kind TEXT NOT NULL DEFAULT 'private',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        UNIQUE(chat_id, message_id)
-      )
-    `).run();
-
-    await env.DB.batch([
-      env.DB.prepare(`
-        DELETE FROM request_telegram_bindings
-        WHERE request_id = ?
-      `).bind(req.id),
-
-      env.DB.prepare(`
-        DELETE FROM request_telegram_tokens
-        WHERE request_id = ?
-      `).bind(req.id),
-
-      env.DB.prepare(`
-        DELETE FROM request_outcomes
-        WHERE request_id = ?
-      `).bind(req.id),
-
-      env.DB.prepare(`
-        DELETE FROM events
-        WHERE request_id = ?
-      `).bind(req.id),
-
-      env.DB.prepare(`
-        DELETE FROM request_files
-        WHERE request_id = ?
-      `).bind(req.id),
-
-      env.DB.prepare(`
-        DELETE FROM job_messages
-        WHERE request_id = ?
-      `).bind(req.id),
-
-      env.DB.prepare(`
-        DELETE FROM job_private_messages
-        WHERE request_id = ?
-      `).bind(req.id),
-
-      env.DB.prepare(`
-        DELETE FROM requests
-        WHERE id = ?
-      `).bind(req.id),
-    ]);
-  } catch (err) {
-    console.error("Permanent request delete failed:", err);
-    await answerCallbackQuery(
-      env,
-      callbackId,
-      "❌ Не вдалося видалити заявку з D1",
-      true
-    );
-    return false;
-  }
-
-  await editMessageText(
-    env,
-    chatId,
-    messageId,
-    [
-      "🗑 ЗАЯВКУ ВИДАЛЕНО",
-      "",
-      `🆔 ${req.request_code}`,
-      "",
-      "Заявку та пов’язані з нею дані видалено.",
-      "Картка клієнта залишилась у базі.",
-    ].join("\n"),
-    [[
-      {
-        text: "📋 До заявок",
-        callback_data: "requests_list",
-      },
-    ]]
-  );
-
-  await answerCallbackQuery(env, callbackId, "🗑 Заявку видалено");
-  return true;
 }
 
 /* =========================================================
@@ -1358,17 +989,12 @@ export async function handleCreateRequest(request, env, headers) {
   const uploadTokenExpiresAt =
     new Date(Date.now() + UPLOAD_LINK_TTL_MS).toISOString();
 
-  const telegramToken = crypto.randomUUID().replaceAll("-", "");
-  const telegramTokenExpiresAt =
-    new Date(Date.now() + TELEGRAM_LINK_TTL_MS).toISOString();
 
   let requestId;
   let requestCode;
   let clientId = null;
 
   try {
-    await ensureTelegramTrackingTables(env);
-
     const seq = await env.DB.prepare(`
       UPDATE sequences
       SET value = value + 1
@@ -1450,12 +1076,6 @@ export async function handleCreateRequest(request, env, headers) {
 
     requestId = insertResult.meta.last_row_id;
 
-    if (source !== "SA-MASTER Jobs") {
-      await env.DB.prepare(`
-        INSERT INTO request_telegram_tokens (token, request_id, expires_at)
-        VALUES (?, ?, ?)
-      `).bind(telegramToken, requestId, telegramTokenExpiresAt).run();
-    }
 
     await env.DB.prepare(`
       INSERT INTO events (
@@ -1557,9 +1177,6 @@ export async function handleCreateRequest(request, env, headers) {
       status: "new",
       status_label: statusLabel("new"),
       upload_token: uploadToken,
-      telegram_link: source !== "SA-MASTER Jobs"
-        ? `https://t.me/${TELEGRAM_BOT_USERNAME}?start=${telegramToken}`
-        : null,
     },
   }, headers);
 }
@@ -1887,11 +1504,6 @@ export async function handleUpdateStatus(
     );
   }
 
-  await notifyRequestClient(
-    env,
-    current.id,
-    [`Заявка № ${current.request_code}`, `Статус: ${newLabel}`].join("\n")
-  );
 
   let object = null;
 
@@ -2165,14 +1777,6 @@ export async function handleTelegramWebhook(
     const text =
       String(msg.text || "").trim();
 
-    const startMatch = text.match(
-      /^\/start(?:@\w+)?\s+([A-Za-z0-9_-]{20,100})$/i
-    );
-
-    if (startMatch) {
-      await bindTelegramRequest(env, msg, startMatch[1]);
-      return json({ ok: true }, headers);
-    }
 
     if (
       String(msg.from?.id) !==
@@ -2346,40 +1950,6 @@ export async function handleTelegramWebhook(
       cq.id,
       data.slice(13),
       workerOrigin,
-      chatId,
-      messageId
-    );
-
-    return json(
-      { ok: true },
-      headers
-    );
-  }
-
-  if (
-    data.startsWith("request_delete_ask:")
-  ) {
-    await askDeleteRequest(
-      env,
-      cq.id,
-      data.slice("request_delete_ask:".length),
-      chatId,
-      messageId
-    );
-
-    return json(
-      { ok: true },
-      headers
-    );
-  }
-
-  if (
-    data.startsWith("request_delete_confirm:")
-  ) {
-    await deleteRequestPermanently(
-      env,
-      cq.id,
-      data.slice("request_delete_confirm:".length),
       chatId,
       messageId
     );
@@ -2901,11 +2471,6 @@ async function handleTelegramStatusUpdate(
     );
   }
 
-  await notifyRequestClient(
-    env,
-    current.id,
-    [`Заявка № ${current.request_code}`, `Статус: ${newLabel}`].join("\n")
-  );
 
   const req = await env.DB.prepare(`
     SELECT *
@@ -2951,12 +2516,6 @@ async function handleTelegramStatusUpdate(
     text: "ℹ️ Деталі",
     callback_data:
       `details:${req.request_code}`,
-  }]);
-
-  buttons.push([{
-    text: "🗑 Видалити заявку",
-    callback_data:
-      `request_delete_ask:${req.request_code}`,
   }]);
 
   buttons.push([
@@ -3111,15 +2670,6 @@ async function handleTransferToJobs(
     );
   }
 
-  await notifyRequestClient(
-    env,
-    req.id,
-    [
-      "Шукаємо майстра 🔎",
-      "Ми передали вашу заявку перевіреним майстрам.",
-      "Повідомимо, щойно знайдеться виконавець.",
-    ].join("\n")
-  );
 
   const updatedText = [
     `🏠 ЗАЯВКА ${req.request_code}`,
