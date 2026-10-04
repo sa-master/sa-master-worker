@@ -1,6 +1,1012 @@
-SA-MASTER — ОНОВЛЕННЯ requests.js
+import { json, error } from "../lib/json.js";
+import {
+  STATUS_LABELS,
+  statusLabel,
+  isValidStatus,
+  withStatusLabel,
+} from "../lib/statuses.js";
+import { normalizePhone, isValidPhone } from "../lib/phone.js";
+import { str } from "../lib/validate.js";
+import {
+  sendMessageWithButtons,
+  editMessageText,
+  answerCallbackQuery,
+} from "../lib/telegram.js";
+import {
+  buildStatusButtons,
+  canChangeStatus,
+  formatRequestText,
+} from "../lib/telegram-buttons.js";
+import {
+  banMasterFromJobsGroup,
+  unbanMasterFromJobsGroup,
+  getJobsChatMember,
+  sendToMaster,
+} from "../lib/telegram-jobs.js";
+import { publishRequestToJobsGroup } from "./jobs.js";
 
-У поточному src/handlers/requests.js заміни ТІЛЬКИ функцію
+const CURRENT_YEAR = 2026;
+const ESTIMATE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const UPLOAD_LINK_TTL_MS = 2 * 60 * 60 * 1000;
+
+const TELEGRAM_LINK_TTL_MS = 24 * 60 * 60 * 1000;
+const TELEGRAM_BOT_USERNAME = "sa_master_pro_bot";
+
+async function ensureTelegramTrackingTables(env) {
+  await env.DB.batch([
+    env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS request_telegram_tokens (
+        token TEXT PRIMARY KEY,
+        request_id INTEGER NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `),
+    env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS request_telegram_bindings (
+        request_id INTEGER PRIMARY KEY,
+        telegram_user_id TEXT NOT NULL,
+        telegram_chat_id TEXT NOT NULL,
+        linked_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+      )
+    `),
+  ]);
+}
+
+async function sendClientTelegram(env, chatId, text, buttons = null) {
+  if (!env.BOT_TOKEN || chatId == null) return { ok: false };
+
+  const payload = {
+    chat_id: chatId,
+    text,
+    disable_web_page_preview: true,
+  };
+
+  if (buttons?.length) {
+    payload.reply_markup = { inline_keyboard: buttons };
+  }
+
+  try {
+    const response = await fetch(
+      `https://api.telegram.org/bot${env.BOT_TOKEN}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      }
+    );
+    return await response.json();
+  } catch (err) {
+    console.error("Client Telegram send failed:", err);
+    return { ok: false };
+  }
+}
+
+async function notifyRequestClient(env, requestId, text, buttons = null) {
+  try {
+    await ensureTelegramTrackingTables(env);
+    const binding = await env.DB.prepare(`
+      SELECT telegram_chat_id
+      FROM request_telegram_bindings
+      WHERE request_id = ?
+      LIMIT 1
+    `).bind(requestId).first();
+
+    if (!binding?.telegram_chat_id) return false;
+    const result = await sendClientTelegram(env, binding.telegram_chat_id, text, buttons);
+    return Boolean(result?.ok);
+  } catch (err) {
+    console.error("Client notification failed:", err);
+    return false;
+  }
+}
+
+async function bindTelegramRequest(env, msg, token) {
+  await ensureTelegramTrackingTables(env);
+
+  const row = await env.DB.prepare(`
+    SELECT t.token, t.request_id, t.expires_at, t.consumed_at, r.request_code
+    FROM request_telegram_tokens t
+    JOIN requests r ON r.id = t.request_id
+    WHERE t.token = ?
+    LIMIT 1
+  `).bind(token).first();
+
+  if (!row || row.consumed_at || new Date(row.expires_at).getTime() <= Date.now()) {
+    await sendClientTelegram(
+      env,
+      msg.chat?.id,
+      "Посилання для підключення заявки недійсне або вже використане."
+    );
+    return false;
+  }
+
+  const telegramUserId = String(msg.from?.id || "");
+  const telegramChatId = String(msg.chat?.id || "");
+  if (!telegramUserId || !telegramChatId) return false;
+
+  await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO request_telegram_bindings (
+        request_id, telegram_user_id, telegram_chat_id, linked_at, updated_at
+      ) VALUES (?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(request_id) DO UPDATE SET
+        telegram_user_id = excluded.telegram_user_id,
+        telegram_chat_id = excluded.telegram_chat_id,
+        updated_at = CURRENT_TIMESTAMP
+    `).bind(row.request_id, telegramUserId, telegramChatId),
+    env.DB.prepare(`
+      UPDATE request_telegram_tokens
+      SET consumed_at = CURRENT_TIMESTAMP
+      WHERE token = ? AND consumed_at IS NULL
+    `).bind(token),
+    env.DB.prepare(`
+      INSERT INTO events (object_id, request_id, event_type, content, author_type)
+      VALUES (NULL, ?, 'telegram_linked', 'Клієнт підключив статус заявки в Telegram', 'client')
+    `).bind(row.request_id),
+  ]);
+
+  await sendClientTelegram(
+    env,
+    telegramChatId,
+    [
+      "Заявку підключено ✅",
+      `№ ${row.request_code}`,
+      "",
+      "Тут ви отримуватимете інформацію про її статус.",
+    ].join("\n")
+  );
+  return true;
+}
+
+
+/* =========================================================
+ * ADMIN: helpers
+ * ========================================================= */
+
+function canEditMessage(chatId, messageId) {
+  return chatId !== null &&
+    chatId !== undefined &&
+    messageId !== null &&
+    messageId !== undefined;
+}
+
+function adminRenderer(env, chatId = null, messageId = null) {
+  if (canEditMessage(chatId, messageId)) {
+    return (text, buttons) =>
+      editMessageText(env, chatId, messageId, text, buttons);
+  }
+
+  return (text, buttons) =>
+    sendMessageWithButtons(env, text, buttons);
+}
+
+async function deleteIncomingCommand(env, msg) {
+  const chatId = msg?.chat?.id;
+  const messageId = msg?.message_id;
+
+  if (!env.BOT_TOKEN || chatId == null || messageId == null) return;
+
+  try {
+    const res = await fetch(
+      `https://api.telegram.org/bot${env.BOT_TOKEN}/deleteMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+        }),
+      }
+    );
+
+    const data = await res.json();
+    if (!data.ok) {
+      console.error(
+        "Telegram deleteMessage failed:",
+        data.description || data
+      );
+    }
+  } catch (err) {
+    console.error("Telegram deleteMessage error:", err);
+  }
+}
+
+/* =========================================================
+ * ADMIN: стан повідомлення статистики
+ * ========================================================= */
+
+async function ensureAdminUiStateTable(env) {
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS admin_ui_state (
+      chat_id TEXT PRIMARY KEY,
+      stats_message_id INTEGER,
+      updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run();
+}
+
+async function rememberStatsMessage(env, chatId, messageId) {
+  if (chatId == null || messageId == null) return;
+
+  await ensureAdminUiStateTable(env);
+
+  await env.DB.prepare(`
+    INSERT INTO admin_ui_state (
+      chat_id,
+      stats_message_id,
+      updated_at
+    )
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(chat_id) DO UPDATE SET
+      stats_message_id = excluded.stats_message_id,
+      updated_at = CURRENT_TIMESTAMP
+  `).bind(
+    String(chatId),
+    Number(messageId)
+  ).run();
+}
+
+async function deleteTelegramMessage(env, chatId, messageId) {
+  if (!env.BOT_TOKEN || chatId == null || messageId == null) return;
+
+  try {
+    const res = await fetch(
+      `https://api.telegram.org/bot${env.BOT_TOKEN}/deleteMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: chatId,
+          message_id: messageId,
+        }),
+      }
+    );
+
+    const data = await res.json();
+
+    if (
+      !data.ok &&
+      !String(data.description || "")
+        .includes("message to delete not found")
+    ) {
+      console.error(
+        "Telegram delete stats message failed:",
+        data.description || data
+      );
+    }
+  } catch (err) {
+    console.error(
+      "Telegram delete stats message error:",
+      err
+    );
+  }
+}
+
+async function removeStatsMessage(env, chatId) {
+  if (chatId == null) return;
+
+  await ensureAdminUiStateTable(env);
+
+  const row = await env.DB.prepare(`
+    SELECT stats_message_id
+    FROM admin_ui_state
+    WHERE chat_id = ?
+    LIMIT 1
+  `).bind(String(chatId)).first();
+
+  if (row?.stats_message_id != null) {
+    await deleteTelegramMessage(
+      env,
+      chatId,
+      row.stats_message_id
+    );
+  }
+
+  await env.DB.prepare(`
+    DELETE FROM admin_ui_state
+    WHERE chat_id = ?
+  `).bind(String(chatId)).run();
+}
+
+/* =========================================================
+ * ADMIN: головне меню / статистика
+ * ========================================================= */
+
+async function sendAdminMenu(env, chatId = null, messageId = null) {
+  const render = adminRenderer(env, chatId, messageId);
+
+  const stats = await env.DB.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM requests) AS requests_total,
+      (SELECT COUNT(*) FROM requests WHERE status = 'new') AS requests_new,
+      (SELECT COUNT(*) FROM masters) AS masters_total,
+      (SELECT COUNT(*) FROM masters WHERE status = 'active') AS masters_active
+  `).first();
+
+  return render(
+    [
+      "📊 СТАТИСТИКА",
+      "",
+      `📋 Заявки: ${stats?.requests_total || 0}`,
+      `🆕 Нові: ${stats?.requests_new || 0}`,
+      `👥 Майстри: ${stats?.masters_total || 0}`,
+      `🟢 Активні: ${stats?.masters_active || 0}`,
+    ].join("\n"),
+    []
+  );
+}
+
+/* =========================================================
+ * ADMIN: заявки
+ * ========================================================= */
+
+async function sendRequestsMenu(env, chatId = null, messageId = null) {
+  const render = adminRenderer(env, chatId, messageId);
+
+  const rows = await env.DB.prepare(`
+    SELECT
+      id, request_code, name, phone, type, type_label,
+      location, status, created_at
+    FROM requests
+    ORDER BY id DESC
+    LIMIT 30
+  `).all();
+
+  const requests = rows.results || [];
+
+  if (!requests.length) {
+    return render(
+      [
+        "📋 ЗАЯВКИ",
+        "",
+        "У базі поки немає заявок.",
+      ].join("\n"),
+      []
+    );
+  }
+
+  const buttons = requests.map((req) => [{
+    text: `${statusLabel(req.status)} · ${req.request_code} · ${req.name || "—"}`,
+    callback_data: `request_open:${req.request_code}`,
+  }]);
+
+  return render(
+    [
+      "📋 ЗАЯВКИ",
+      "",
+      `Показано останніх: ${requests.length}`,
+      "",
+      "Оберіть заявку:",
+    ].join("\n"),
+    buttons
+  );
+}
+
+async function showRequestCard(
+  env,
+  callbackId,
+  requestCode,
+  workerOrigin,
+  chatId,
+  messageId
+) {
+  const req = await env.DB.prepare(`
+    SELECT *
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!req) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Заявку не знайдено",
+      true
+    );
+    return;
+  }
+
+  const text = [
+    `🏠 ЗАЯВКА ${req.request_code}`,
+    "",
+    `👤 ${req.name || "—"}`,
+    `📞 ${req.phone || "—"}`,
+    `🔧 ${req.type_label || req.type || "—"}`,
+    `📍 ${req.location || "—"}`,
+    req.project ? `📐 Дизайн-проєкт: ${req.project}` : null,
+    req.timing ? `🗓 Початок: ${req.timing}` : null,
+    req.consultation_date
+      ? `📅 Консультація: ${req.consultation_date}`
+      : null,
+    `📊 Статус: ${statusLabel(req.status)}`,
+    req.notes ? `📝 ${req.notes}` : null,
+  ].filter(Boolean).join("\n");
+
+  const buttons = buildStatusButtons(
+    req.request_code,
+    req.status,
+    calculatorUrl(
+      req.request_code,
+      req.estimate_token,
+      workerOrigin,
+      env
+    )
+  );
+
+  if (!req.transferred_to_jobs) {
+    buttons.push([{
+      text: "🤝 Передати в канал",
+      callback_data: `transfer_to_jobs:${req.request_code}`,
+    }]);
+  }
+
+  buttons.push([{
+    text: "ℹ️ Деталі",
+    callback_data: `details:${req.request_code}`,
+  }]);
+
+  buttons.push([
+    { text: "📋 До заявок", callback_data: "requests_list" },
+  ]);
+
+  await editMessageText(
+    env,
+    chatId,
+    messageId,
+    text,
+    buttons
+  );
+
+  await answerCallbackQuery(env, callbackId, "");
+}
+
+/* =========================================================
+ * ADMIN: майстри
+ * ========================================================= */
+
+function adminMasterStatusLabel(status) {
+  if (status === "active") return "🟢 Активний";
+  if (status === "blocked") return "🔴 Заблокований";
+  if (status === "inactive") return "⚪ Неактивний";
+  return `⚪ ${status || "невідомо"}`;
+}
+
+async function getAdminMaster(env, masterId) {
+  return env.DB.prepare(`
+    SELECT
+      id,
+      telegram_id,
+      username,
+      first_name,
+      phone,
+      specializations,
+      cities,
+      status,
+      referral_token,
+      application_id,
+      joined_at,
+      good_deals_count,
+      no_answer_count,
+      weird_client_count
+    FROM masters
+    WHERE id = ?
+    LIMIT 1
+  `).bind(masterId).first();
+}
+
+async function sendMastersMenu(env, chatId = null, messageId = null) {
+  const render = adminRenderer(env, chatId, messageId);
+
+  const rows = await env.DB.prepare(`
+    SELECT
+      id,
+      first_name,
+      username,
+      specializations,
+      cities,
+      status
+    FROM masters
+    ORDER BY
+      CASE status
+        WHEN 'active' THEN 1
+        WHEN 'blocked' THEN 2
+        WHEN 'inactive' THEN 3
+        ELSE 4
+      END,
+      id DESC
+    LIMIT 100
+  `).all();
+
+  const masters = rows.results || [];
+
+  if (!masters.length) {
+    return render(
+      [
+        "👥 МАЙСТРИ",
+        "",
+        "У базі поки немає зареєстрованих майстрів.",
+      ].join("\n"),
+      []
+    );
+  }
+
+  const buttons = masters.map((master) => [{
+    text:
+      `${master.status === "active"
+        ? "🟢"
+        : master.status === "blocked"
+          ? "🔴"
+          : "⚪"} ` +
+      `${master.first_name ||
+        master.username ||
+        `Майстер #${master.id}`}`,
+    callback_data: `master_open:${master.id}`,
+  }]);
+
+  return render(
+    [
+      "👥 МАЙСТРИ SA-MASTER Jobs",
+      "",
+      `Всього: ${masters.length}`,
+      "",
+      "Оберіть майстра:",
+    ].join("\n"),
+    buttons
+  );
+}
+
+async function showMasterCard(
+  env,
+  callbackId,
+  masterId,
+  chatId,
+  messageId
+) {
+  const master = await getAdminMaster(env, masterId);
+
+  if (!master) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Майстра не знайдено",
+      true
+    );
+    return;
+  }
+
+  let tgStatus = "—";
+
+  try {
+    const member = await getJobsChatMember(
+      env,
+      master.telegram_id
+    );
+
+    tgStatus = member?.ok
+      ? (member.result?.status || "—")
+      : `помилка: ${member?.description || "невідомо"}`;
+  } catch {
+    tgStatus = "помилка перевірки";
+  }
+
+  const text = [
+    "👤 МАЙСТЕР SA-MASTER Jobs",
+    "",
+    `Ім'я: ${master.first_name || "—"}`,
+    `Username: ${master.username ? `@${master.username}` : "—"}`,
+    `📞 ${master.phone || "—"}`,
+    `🛠 ${master.specializations || "—"}`,
+    `🏙 ${master.cities || "—"}`,
+    `🆔 Telegram: ${master.telegram_id}`,
+    `📊 Статус: ${adminMasterStatusLabel(master.status)}`,
+    `👥 Telegram-група: ${tgStatus}`,
+    "",
+    `✅ Успішні заявки: ${master.good_deals_count || 0}`,
+    `📵 Не відповіли: ${master.no_answer_count || 0}`,
+    `⚠️ Дивні клієнти: ${master.weird_client_count || 0}`,
+  ].join("\n");
+
+  const buttons = [];
+
+  if (master.status === "active") {
+    buttons.push([{
+      text: "🚫 Заблокувати",
+      callback_data: `master_block:${master.id}`,
+    }]);
+  } else if (master.status === "blocked") {
+    buttons.push([{
+      text: "✅ Розблокувати",
+      callback_data: `master_unblock:${master.id}`,
+    }]);
+  }
+
+  buttons.push([{
+    text: "🗑 Видалити назавжди",
+    callback_data: `master_delete_ask:${master.id}`,
+  }]);
+
+  buttons.push([
+    { text: "👥 До списку", callback_data: "masters_list" },
+  ]);
+
+  await editMessageText(
+    env,
+    chatId,
+    messageId,
+    text,
+    buttons
+  );
+
+  await answerCallbackQuery(env, callbackId, "");
+}
+
+async function blockMaster(env, callbackId, masterId) {
+  const master = await getAdminMaster(env, masterId);
+
+  if (!master) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Майстра не знайдено",
+      true
+    );
+    return false;
+  }
+
+  if (master.status === "blocked") {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "⚠️ Майстер уже заблокований",
+      true
+    );
+    return false;
+  }
+
+  const ban = await banMasterFromJobsGroup(
+    env,
+    master.telegram_id
+  );
+
+  if (!ban?.ok) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      `❌ Telegram: ${ban?.description || "не вдалося заблокувати"}`,
+      true
+    );
+    return false;
+  }
+
+  try {
+    await env.DB.prepare(`
+      UPDATE masters
+      SET
+        status = 'blocked',
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(master.id).run();
+  } catch (err) {
+    console.error("DB block master failed:", err);
+
+    try {
+      await unbanMasterFromJobsGroup(
+        env,
+        master.telegram_id
+      );
+    } catch (rollbackErr) {
+      console.error(
+        "Rollback unban after DB error failed:",
+        rollbackErr
+      );
+    }
+
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Не вдалося зберегти блокування в D1",
+      true
+    );
+
+    return false;
+  }
+
+  try {
+    await sendToMaster(
+      env,
+      master.telegram_id,
+      [
+        "🚫 ДОСТУП ДО SA-MASTER Jobs ЗАБЛОКОВАНО",
+        "",
+        "Ваш профіль заблоковано адміністратором.",
+        "Доступ до групи заявок та отримання заявок вимкнено.",
+        "",
+        "Для відновлення доступу зверніться до адміністратора.",
+      ].join("\n")
+    );
+  } catch (err) {
+    console.error(
+      "Blocked master notification failed:",
+      err
+    );
+  }
+
+  await answerCallbackQuery(
+    env,
+    callbackId,
+    "🚫 Майстра заблоковано"
+  );
+
+  return true;
+}
+
+async function unblockMaster(env, callbackId, masterId) {
+  const master = await getAdminMaster(env, masterId);
+
+  if (!master) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Майстра не знайдено",
+      true
+    );
+    return false;
+  }
+
+  if (master.status === "active") {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "⚠️ Майстер уже активний",
+      true
+    );
+    return false;
+  }
+
+  const unban = await unbanMasterFromJobsGroup(
+    env,
+    master.telegram_id
+  );
+
+  if (!unban?.ok) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      `❌ Telegram: ${unban?.description || "не вдалося розблокувати"}`,
+      true
+    );
+    return false;
+  }
+
+  try {
+    await env.DB.prepare(`
+      UPDATE masters
+      SET
+        status = 'active',
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(master.id).run();
+  } catch (err) {
+    console.error("DB unblock master failed:", err);
+
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Не вдалося змінити статус у D1",
+      true
+    );
+
+    return false;
+  }
+
+  try {
+    await sendToMaster(
+      env,
+      master.telegram_id,
+      [
+        "✅ ДОСТУП ДО SA-MASTER Jobs ВІДНОВЛЕНО",
+        "",
+        "Ваш профіль знову активний.",
+        "Відкрийте бота /start та отримайте нове запрошення до групи заявок.",
+      ].join("\n")
+    );
+  } catch (err) {
+    console.error(
+      "Unblocked master notification failed:",
+      err
+    );
+  }
+
+  await answerCallbackQuery(
+    env,
+    callbackId,
+    "✅ Майстра розблоковано"
+  );
+
+  return true;
+}
+
+async function deleteMasterPermanently(
+  env,
+  callbackId,
+  masterId,
+  chatId,
+  messageId
+) {
+  const master = await getAdminMaster(env, masterId);
+
+  if (!master) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Майстра не знайдено",
+      true
+    );
+    return false;
+  }
+
+  try {
+    const ban = await banMasterFromJobsGroup(
+      env,
+      master.telegram_id
+    );
+
+    if (!ban?.ok) {
+      console.error(
+        "Telegram cleanup before master delete failed:",
+        ban?.description || ban
+      );
+    }
+  } catch (err) {
+    console.error(
+      "Telegram cleanup before master delete failed:",
+      err
+    );
+  }
+
+  const cleanupSteps = [
+    {
+      name: "request_outcomes",
+      statement: env.DB.prepare(`
+        DELETE FROM request_outcomes
+        WHERE master_id = ?
+      `).bind(master.telegram_id),
+    },
+    {
+      name: "requests.source_master_id",
+      statement: env.DB.prepare(`
+        UPDATE requests
+        SET
+          source_master_id = NULL,
+          source_type = 'client',
+          updated_at = CURRENT_TIMESTAMP
+        WHERE source_master_id = ?
+      `).bind(master.id),
+    },
+    {
+      name: "requests.assigned_master_id",
+      statement: env.DB.prepare(`
+        UPDATE requests
+        SET
+          assigned_master_id = NULL,
+          assigned_master_name = NULL,
+          assigned_at = NULL,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE assigned_master_id = ?
+      `).bind(master.telegram_id),
+    },
+    {
+      name: "events.author_id",
+      statement: env.DB.prepare(`
+        UPDATE events
+        SET author_id = NULL
+        WHERE author_type = 'master'
+          AND author_id = ?
+      `).bind(String(master.id)),
+    },
+    {
+      name: "master_applications",
+      statement: env.DB.prepare(`
+        DELETE FROM master_applications
+        WHERE telegram_id = ?
+      `).bind(master.telegram_id),
+    },
+    {
+      name: "masters",
+      statement: env.DB.prepare(`
+        DELETE FROM masters
+        WHERE id = ?
+      `).bind(master.id),
+    },
+  ];
+
+  for (const step of cleanupSteps) {
+    try {
+      console.log(
+        `Permanent master delete: ${step.name}`
+      );
+
+      await step.statement.run();
+    } catch (err) {
+      const message =
+        err?.message ||
+        err?.cause?.message ||
+        String(err);
+
+      console.error(
+        `Permanent master delete failed at step "${step.name}":`,
+        message,
+        err
+      );
+
+      await answerCallbackQuery(
+        env,
+        callbackId,
+        `❌ Помилка видалення: ${step.name}`,
+        true
+      );
+
+      return false;
+    }
+  }
+
+  await editMessageText(
+    env,
+    chatId,
+    messageId,
+    [
+      "🗑 МАЙСТРА ВИДАЛЕНО",
+      "",
+      "Профіль, анкета, статистика та відомі персональні дані майстра видалені.",
+      "",
+      "Клієнтські заявки та їх історія залишилися в системі без прив'язки до видаленого профілю.",
+    ].join("\n"),
+    [[
+      {
+        text: "👥 До списку майстрів",
+        callback_data: "masters_list",
+      },
+    ]]
+  );
+
+  await answerCallbackQuery(
+    env,
+    callbackId,
+    "🗑 Майстра видалено назавжди"
+  );
+
+  return true;
+}
+
+/* =========================================================
+ * Посилання на калькулятор
+ * ========================================================= */
+
+function calculatorUrl(
+  requestCode,
+  token,
+  workerOrigin,
+  env
+) {
+  if (!token || !env.CALCULATOR_URL) return "";
+
+  const url = new URL(env.CALCULATOR_URL);
+
+  url.searchParams.set("request", requestCode);
+  url.searchParams.set("token", token);
+  url.searchParams.set("api", workerOrigin);
+
+  return url.toString();
+}
+
+/* =========================================================
+ * POST / — створення заявки
+ * ========================================================= */
+
 export async function handleCreateRequest(...) на версію нижче.
 Решту файлу не змінюй.
 
@@ -110,11 +1116,17 @@ export async function handleCreateRequest(request, env, headers) {
   const uploadTokenExpiresAt =
     new Date(Date.now() + UPLOAD_LINK_TTL_MS).toISOString();
 
+  const telegramToken = crypto.randomUUID().replaceAll("-", "");
+  const telegramTokenExpiresAt =
+    new Date(Date.now() + TELEGRAM_LINK_TTL_MS).toISOString();
+
   let requestId;
   let requestCode;
   let clientId = null;
 
   try {
+    await ensureTelegramTrackingTables(env);
+
     const seq = await env.DB.prepare(`
       UPDATE sequences
       SET value = value + 1
@@ -195,6 +1207,13 @@ export async function handleCreateRequest(request, env, headers) {
     }
 
     requestId = insertResult.meta.last_row_id;
+
+    if (source !== "SA-MASTER Jobs") {
+      await env.DB.prepare(`
+        INSERT INTO request_telegram_tokens (token, request_id, expires_at)
+        VALUES (?, ?, ?)
+      `).bind(telegramToken, requestId, telegramTokenExpiresAt).run();
+    }
 
     await env.DB.prepare(`
       INSERT INTO events (
@@ -287,6 +1306,1681 @@ export async function handleCreateRequest(request, env, headers) {
       status: "new",
       status_label: statusLabel("new"),
       upload_token: uploadToken,
+      telegram_link: source !== "SA-MASTER Jobs"
+        ? `https://t.me/${TELEGRAM_BOT_USERNAME}?start=${telegramToken}`
+        : null,
     },
   }, headers);
+}
+
+/* =========================================================
+ * API: calculator request
+ * ========================================================= */
+
+export async function handleGetCalculatorRequest(
+  request,
+  env,
+  headers,
+  params,
+  url
+) {
+  const [requestCode] = params;
+
+  const token = str(
+    url.searchParams.get("token"),
+    { max: 100, required: true }
+  );
+
+  if (!token) {
+    return error(
+      "Відсутній ключ заявки",
+      headers,
+      403
+    );
+  }
+
+  const row = await env.DB.prepare(`
+    SELECT
+      request_code,
+      name,
+      phone,
+      location,
+      type,
+      type_label,
+      timing,
+      project,
+      consultation_date,
+      notes
+    FROM requests
+    WHERE request_code = ?
+      AND estimate_token = ?
+      AND datetime(estimate_token_expires_at) > CURRENT_TIMESTAMP
+    LIMIT 1
+  `).bind(
+    requestCode,
+    token
+  ).first();
+
+  if (!row) {
+    return error(
+      "Посилання на заявку недійсне або вже прострочене",
+      headers,
+      404
+    );
+  }
+
+  return json(
+    {
+      ok: true,
+      request: row,
+    },
+    headers
+  );
+}
+
+/* =========================================================
+ * API: requests
+ * ========================================================= */
+
+export async function handleListRequests(
+  request,
+  env,
+  headers,
+  _params,
+  url
+) {
+  const limit = Math.min(
+    Number(url.searchParams.get("limit")) || 50,
+    200
+  );
+
+  const offset = Math.max(
+    Number(url.searchParams.get("offset")) || 0,
+    0
+  );
+
+  const result = await env.DB.prepare(`
+    SELECT
+      r.*,
+      c.id AS client_id,
+      c.name AS client_name,
+      c.phone AS client_phone
+    FROM requests r
+    LEFT JOIN clients c
+      ON c.id = r.client_id
+    ORDER BY r.id DESC
+    LIMIT ?
+    OFFSET ?
+  `).bind(
+    limit,
+    offset
+  ).all();
+
+  return json({
+    ok: true,
+    requests:
+      (result.results || [])
+        .map(withStatusLabel),
+    limit,
+    offset,
+  }, headers);
+}
+
+export async function handleGetRequest(
+  request,
+  env,
+  headers,
+  params
+) {
+  const [requestCode] = params;
+
+  const row = await env.DB.prepare(`
+    SELECT
+      r.*,
+      c.name AS client_name,
+      c.phone AS client_phone,
+      o.object_code,
+      o.name AS object_name,
+      o.address AS object_address,
+      o.status AS object_status
+    FROM requests r
+    LEFT JOIN clients c
+      ON c.id = r.client_id
+    LEFT JOIN objects o
+      ON o.id = r.object_id
+    WHERE r.request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!row) {
+    return error(
+      "Заявку не знайдено",
+      headers,
+      404
+    );
+  }
+
+  return json({
+    ok: true,
+    request: {
+      ...row,
+      status_label:
+        statusLabel(row.status),
+      object_status_label:
+        row.object_status
+          ? statusLabel(row.object_status)
+          : null,
+    },
+  }, headers);
+}
+
+export async function handleUpdateStatus(
+  request,
+  env,
+  headers,
+  params
+) {
+  const [requestCode] = params;
+
+  let body;
+
+  try {
+    body = await request.json();
+  } catch {
+    return error(
+      "Некоректний JSON",
+      headers,
+      400
+    );
+  }
+
+  const newStatus =
+    String(body.status || "").trim();
+
+  if (!isValidStatus(newStatus)) {
+    return error(
+      "Невідомий статус",
+      headers,
+      400,
+      {
+        allowed_statuses:
+          Object.keys(STATUS_LABELS),
+      }
+    );
+  }
+
+  const current = await env.DB.prepare(`
+    SELECT
+      id,
+      request_code,
+      status,
+      object_id
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!current) {
+    return error(
+      "Заявку не знайдено",
+      headers,
+      404
+    );
+  }
+
+  const oldStatus = current.status;
+
+  if (oldStatus === newStatus) {
+    return json({
+      ok: true,
+      unchanged: true,
+      status: newStatus,
+    }, headers);
+  }
+
+  const oldLabel =
+    statusLabel(oldStatus);
+
+  const newLabel =
+    statusLabel(newStatus);
+
+  const eventContent =
+    `${oldLabel} → ${newLabel}`;
+
+  const statements = [
+    env.DB.prepare(`
+      UPDATE requests
+      SET
+        status = ?,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).bind(
+      newStatus,
+      current.id
+    ),
+
+    env.DB.prepare(`
+      INSERT INTO events (
+        object_id,
+        request_id,
+        event_type,
+        content,
+        author_type
+      )
+      VALUES (
+        ?,
+        ?,
+        'status_changed',
+        ?,
+        'system'
+      )
+    `).bind(
+      current.object_id || null,
+      current.id,
+      eventContent
+    ),
+  ];
+
+  const syncObject =
+    current.object_id &&
+    newStatus !== "cancelled";
+
+  if (syncObject) {
+    statements.push(
+      env.DB.prepare(`
+        UPDATE objects
+        SET
+          status = ?,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(
+        newStatus,
+        current.object_id
+      ),
+
+      env.DB.prepare(`
+        INSERT INTO events (
+          object_id,
+          request_id,
+          event_type,
+          content,
+          author_type
+        )
+        VALUES (
+          ?,
+          ?,
+          'object_status_changed',
+          ?,
+          'system'
+        )
+      `).bind(
+        current.object_id,
+        current.id,
+        `Статус об'єкта → ${newLabel}`
+      )
+    );
+  }
+
+  try {
+    await env.DB.batch(statements);
+  } catch (err) {
+    console.error(
+      "Status update batch failed:",
+      err
+    );
+
+    return error(
+      "Не вдалося оновити статус",
+      headers,
+      500
+    );
+  }
+
+  await notifyRequestClient(
+    env,
+    current.id,
+    [`Заявка № ${current.request_code}`, `Статус: ${newLabel}`].join("\n")
+  );
+
+  let object = null;
+
+  if (current.object_id) {
+    object = await env.DB.prepare(`
+      SELECT
+        id,
+        object_code,
+        name,
+        status
+      FROM objects
+      WHERE id = ?
+      LIMIT 1
+    `).bind(
+      current.object_id
+    ).first();
+
+    if (object) {
+      object.status_label =
+        statusLabel(object.status);
+
+      object.updated =
+        syncObject;
+    }
+  }
+
+  return json({
+    ok: true,
+    request: {
+      id: current.id,
+      request_code:
+        current.request_code,
+      old_status:
+        oldStatus,
+      old_status_label:
+        oldLabel,
+      status:
+        newStatus,
+      status_label:
+        newLabel,
+    },
+    object,
+    event: {
+      event_type: "status_changed",
+      content: eventContent,
+      author_type: "system",
+    },
+  }, headers);
+}
+
+export async function handleGetEvents(
+  request,
+  env,
+  headers,
+  params
+) {
+  const [requestCode] = params;
+
+  const current = await env.DB.prepare(`
+    SELECT
+      id,
+      request_code,
+      status
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!current) {
+    return error(
+      "Заявку не знайдено",
+      headers,
+      404
+    );
+  }
+
+  const events = await env.DB.prepare(`
+    SELECT
+      id,
+      request_id,
+      object_id,
+      event_type,
+      content,
+      author_type,
+      author_id,
+      created_at
+    FROM events
+    WHERE request_id = ?
+    ORDER BY id ASC
+  `).bind(current.id).all();
+
+  return json({
+    ok: true,
+    request: {
+      id: current.id,
+      request_code:
+        current.request_code,
+      status:
+        current.status,
+      status_label:
+        statusLabel(current.status),
+    },
+    events:
+      events.results || [],
+  }, headers);
+}
+
+export async function handleAttachClient(
+  request,
+  env,
+  headers,
+  params
+) {
+  const [requestCode] = params;
+
+  const req = await env.DB.prepare(`
+    SELECT *
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!req) {
+    return error(
+      "Заявку не знайдено",
+      headers,
+      404
+    );
+  }
+
+  if (req.client_id) {
+    const client = await env.DB.prepare(`
+      SELECT
+        id,
+        name,
+        phone
+      FROM clients
+      WHERE id = ?
+      LIMIT 1
+    `).bind(
+      req.client_id
+    ).first();
+
+    return json({
+      ok: true,
+      created: false,
+      existing: true,
+      request: req,
+      client,
+    }, headers);
+  }
+
+  const normalizedPhone =
+    normalizePhone(req.phone);
+
+  if (!normalizedPhone) {
+    return error(
+      "Некоректний телефон у заявці",
+      headers,
+      400
+    );
+  }
+
+  let client = await env.DB.prepare(`
+    SELECT
+      id,
+      name,
+      phone
+    FROM clients
+    WHERE phone = ?
+    LIMIT 1
+  `).bind(
+    normalizedPhone
+  ).first();
+
+  let created = false;
+
+  if (!client) {
+    const ins = await env.DB.prepare(`
+      INSERT INTO clients (
+        name,
+        phone
+      )
+      VALUES (?, ?)
+    `).bind(
+      req.name || "—",
+      normalizedPhone
+    ).run();
+
+    if (!ins.meta?.last_row_id) {
+      return error(
+        "Не вдалося створити клієнта",
+        headers,
+        500
+      );
+    }
+
+    client = await env.DB.prepare(`
+      SELECT
+        id,
+        name,
+        phone
+      FROM clients
+      WHERE id = ?
+      LIMIT 1
+    `).bind(
+      ins.meta.last_row_id
+    ).first();
+
+    created = true;
+  }
+
+  await env.DB.prepare(`
+    UPDATE requests
+    SET
+      client_id = ?,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).bind(
+    client.id,
+    req.id
+  ).run();
+
+  return json({
+    ok: true,
+    created,
+    existing: !created,
+    request: {
+      ...req,
+      client_id: client.id,
+    },
+    client,
+  }, headers);
+}
+
+/* =========================================================
+ * POST /telegram-webhook
+ * ========================================================= */
+
+export async function handleTelegramWebhook(
+  request,
+  env,
+  headers
+) {
+  let update;
+
+  try {
+    update = await request.json();
+  } catch {
+    return json(
+      { ok: false },
+      headers,
+      400
+    );
+  }
+
+  /* -------------------------------------------------------
+   * Звичайні повідомлення / команди.
+   *
+   * ВАЖЛИВО:
+   * /start    -> ТІЛЬКИ статистика.
+   * /requests -> ТІЛЬКИ список заявок.
+   * /masters  -> ТІЛЬКИ список майстрів.
+   *
+   * Немає admin_ui_state і немає автоматичного виклику
+   * sendAdminMenu() з /requests або /masters.
+   * ----------------------------------------------------- */
+
+  if (update.message) {
+    const msg = update.message;
+    const text =
+      String(msg.text || "").trim();
+
+    const startMatch = text.match(
+      /^\/start(?:@\w+)?\s+([A-Za-z0-9_-]{20,100})$/i
+    );
+
+    if (startMatch) {
+      await bindTelegramRequest(env, msg, startMatch[1]);
+      return json({ ok: true }, headers);
+    }
+
+    if (
+      String(msg.from?.id) !==
+      String(env.CHAT_ID)
+    ) {
+      return json(
+        { ok: true },
+        headers
+      );
+    }
+
+    const adminCommand =
+      text.split(/\s+/)[0].split("@")[0].toLowerCase();
+
+    if (adminCommand === "/start") {
+      await deleteIncomingCommand(env, msg);
+
+      // На /start статистика є окремим тимчасовим екраном.
+      // Спочатку прибираємо попередню статистику, якщо вона відома.
+      await removeStatsMessage(env, msg.chat?.id);
+
+      const sent = await sendAdminMenu(env);
+
+      if (sent?.ok && sent?.result?.message_id != null) {
+        await rememberStatsMessage(
+          env,
+          sent.result.chat?.id ?? msg.chat?.id ?? env.CHAT_ID,
+          sent.result.message_id
+        );
+      }
+
+      return json(
+        { ok: true },
+        headers
+      );
+    }
+
+    if (adminCommand === "/requests") {
+      await deleteIncomingCommand(env, msg);
+
+      // При переході до заявок прибираємо екран статистики.
+      await removeStatsMessage(env, msg.chat?.id);
+
+      await sendRequestsMenu(env);
+
+      return json(
+        { ok: true },
+        headers
+      );
+    }
+
+    if (adminCommand === "/masters") {
+      await deleteIncomingCommand(env, msg);
+
+      // При переході до майстрів прибираємо екран статистики.
+      await removeStatsMessage(env, msg.chat?.id);
+
+      await sendMastersMenu(env);
+
+      return json(
+        { ok: true },
+        headers
+      );
+    }
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  /* -------------------------------------------------------
+   * Callback-и inline-кнопок
+   * ----------------------------------------------------- */
+
+  if (!update.callback_query) {
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  const cq = update.callback_query;
+
+  if (
+    String(cq.from?.id) !==
+    String(env.CHAT_ID)
+  ) {
+    await answerCallbackQuery(
+      env,
+      cq.id,
+      "❌ Немає доступу",
+      true
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  const data =
+    String(cq.data || "");
+
+  const chatId =
+    cq.message?.chat?.id;
+
+  const messageId =
+    cq.message?.message_id;
+
+  const workerOrigin =
+    new URL(request.url).origin;
+
+  if (!canEditMessage(chatId, messageId)) {
+    await answerCallbackQuery(
+      env,
+      cq.id,
+      "❌ Не вдалося визначити повідомлення адмінки",
+      true
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  if (data === "admin_menu") {
+    await sendAdminMenu(
+      env,
+      chatId,
+      messageId
+    );
+
+    await answerCallbackQuery(
+      env,
+      cq.id,
+      ""
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  if (data === "requests_list") {
+    await sendRequestsMenu(
+      env,
+      chatId,
+      messageId
+    );
+
+    await answerCallbackQuery(
+      env,
+      cq.id,
+      ""
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  if (
+    data.startsWith("request_open:")
+  ) {
+    await showRequestCard(
+      env,
+      cq.id,
+      data.slice(13),
+      workerOrigin,
+      chatId,
+      messageId
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  if (data === "masters_list") {
+    await sendMastersMenu(
+      env,
+      chatId,
+      messageId
+    );
+
+    await answerCallbackQuery(
+      env,
+      cq.id,
+      ""
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  if (
+    data.startsWith("master_open:")
+  ) {
+    await showMasterCard(
+      env,
+      cq.id,
+      Number(data.slice(12)),
+      chatId,
+      messageId
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  if (
+    data.startsWith("master_block:")
+  ) {
+    const masterId =
+      Number(data.slice(13));
+
+    const changed =
+      await blockMaster(
+        env,
+        cq.id,
+        masterId
+      );
+
+    if (changed) {
+      await showMasterCard(
+        env,
+        "",
+        masterId,
+        chatId,
+        messageId
+      );
+    }
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  if (
+    data.startsWith("master_unblock:")
+  ) {
+    const masterId =
+      Number(data.slice(15));
+
+    const changed =
+      await unblockMaster(
+        env,
+        cq.id,
+        masterId
+      );
+
+    if (changed) {
+      await showMasterCard(
+        env,
+        "",
+        masterId,
+        chatId,
+        messageId
+      );
+    }
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  if (
+    data.startsWith("master_delete_ask:")
+  ) {
+    const masterId =
+      Number(data.slice(18));
+
+    const master =
+      await getAdminMaster(
+        env,
+        masterId
+      );
+
+    if (!master) {
+      await answerCallbackQuery(
+        env,
+        cq.id,
+        "❌ Майстра не знайдено",
+        true
+      );
+
+      return json(
+        { ok: true },
+        headers
+      );
+    }
+
+    const masterLabel =
+      master.username
+        ? `@${master.username}`
+        : master.first_name ||
+          `Майстер #${master.id}`;
+
+    await editMessageText(
+      env,
+      chatId,
+      messageId,
+      [
+        "⚠️ ВИДАЛИТИ МАЙСТРА НАЗАВЖДИ?",
+        "",
+        `👤 ${masterLabel}`,
+        `📞 ${master.phone || "—"}`,
+        "",
+        "Буде видалено профіль, анкету, статистику та відомі персональні дані майстра.",
+        "",
+        "Клієнтські заявки та їх історія залишаться, але прив'язка до цього майстра буде очищена.",
+        "",
+        "Цю дію неможливо скасувати.",
+      ].join("\n"),
+      [[
+        {
+          text: "🗑 Видалити",
+          callback_data:
+            `master_delete_confirm:${master.id}`,
+        },
+        {
+          text: "Скасувати",
+          callback_data:
+            `master_open:${master.id}`,
+        },
+      ]]
+    );
+
+    await answerCallbackQuery(
+      env,
+      cq.id,
+      ""
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  if (
+    data.startsWith("master_delete_confirm:")
+  ) {
+    await deleteMasterPermanently(
+      env,
+      cq.id,
+      Number(data.slice(22)),
+      chatId,
+      messageId
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  if (data.startsWith("details:")) {
+    return handleTelegramDetails(
+      env,
+      headers,
+      data.slice(8),
+      cq.id,
+      chatId,
+      messageId
+    );
+  }
+
+  if (data.startsWith("status:")) {
+    const [
+      ,
+      requestCode,
+      newStatus,
+    ] = data.split(":");
+
+    return handleTelegramStatusUpdate(
+      env,
+      headers,
+      requestCode,
+      newStatus,
+      cq.id,
+      chatId,
+      messageId,
+      workerOrigin
+    );
+  }
+
+  if (
+    data.startsWith("transfer_to_jobs:")
+  ) {
+    return handleTransferToJobs(
+      env,
+      headers,
+      data.slice(17),
+      cq,
+      chatId,
+      messageId,
+      workerOrigin
+    );
+  }
+
+  if (data.startsWith("jobs_review_return:")) {
+    return handleJobsReviewReturn(
+      env, headers, data.slice("jobs_review_return:".length),
+      cq.id, chatId, messageId
+    );
+  }
+
+  if (data.startsWith("jobs_review_close:")) {
+    return handleJobsReviewClose(
+      env, headers, data.slice("jobs_review_close:".length),
+      cq.id, chatId, messageId
+    );
+  }
+
+  if (data.startsWith("app_approve:")) {
+    const {
+      handleApplicationReview,
+    } = await import("./join.js");
+
+    return handleApplicationReview(
+      env,
+      headers,
+      Number(data.slice(12)),
+      "approve",
+      cq
+    );
+  }
+
+  if (data.startsWith("app_reject:")) {
+    const {
+      handleApplicationReview,
+    } = await import("./join.js");
+
+    return handleApplicationReview(
+      env,
+      headers,
+      Number(data.slice(11)),
+      "reject",
+      cq
+    );
+  }
+
+  await answerCallbackQuery(
+    env,
+    cq.id,
+    "❓ Невідома дія",
+    true
+  );
+
+  return json(
+    { ok: true },
+    headers
+  );
+}
+
+/* =========================================================
+ * TELEGRAM: деталі заявки
+ * ========================================================= */
+
+async function handleTelegramDetails(
+  env,
+  headers,
+  requestCode,
+  callbackId,
+  chatId,
+  messageId
+) {
+  const req = await env.DB.prepare(`
+    SELECT *
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!req) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Заявку не знайдено",
+      true
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  const events = await env.DB.prepare(`
+    SELECT
+      event_type,
+      content,
+      created_at
+    FROM events
+    WHERE request_id = ?
+    ORDER BY id ASC
+  `).bind(req.id).all();
+
+  const lines = [
+    formatRequestText(req),
+    "",
+    `🕐 Створено: ${req.created_at || "—"}`,
+    `🕐 Оновлено: ${req.updated_at || "—"}`,
+  ];
+
+  if (events.results?.length) {
+    lines.push(
+      "",
+      "📜 Історія:"
+    );
+
+    for (
+      const ev of events.results.slice(-10)
+    ) {
+      lines.push(
+        `• ${ev.content}`
+      );
+    }
+  }
+
+  await editMessageText(
+    env,
+    chatId,
+    messageId,
+    lines.join("\n"),
+    [[
+      {
+        text: "⬅️ До заявки",
+        callback_data:
+          `request_open:${requestCode}`,
+      },
+    ]]
+  );
+
+  await answerCallbackQuery(
+    env,
+    callbackId,
+    ""
+  );
+
+  return json(
+    { ok: true },
+    headers
+  );
+}
+
+/* =========================================================
+ * TELEGRAM: зміна статусу
+ * ========================================================= */
+
+async function handleTelegramStatusUpdate(
+  env,
+  headers,
+  requestCode,
+  newStatus,
+  callbackId,
+  chatId,
+  messageId,
+  workerOrigin
+) {
+  if (!isValidStatus(newStatus)) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Невідомий статус",
+      true
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  const current = await env.DB.prepare(`
+    SELECT
+      id,
+      request_code,
+      status,
+      object_id,
+      name,
+      phone
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!current) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Заявку не знайдено",
+      true
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  if (
+    !canChangeStatus(
+      current.status,
+      newStatus
+    )
+  ) {
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      `❌ Неможливо: статус «${statusLabel(current.status)}» → «${statusLabel(newStatus)}»`,
+      true
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  const oldLabel =
+    statusLabel(current.status);
+
+  const newLabel =
+    statusLabel(newStatus);
+
+  const eventContent =
+    `${oldLabel} → ${newLabel}`;
+
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE requests
+        SET
+          status = ?,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(
+        newStatus,
+        current.id
+      ),
+
+      env.DB.prepare(`
+        INSERT INTO events (
+          object_id,
+          request_id,
+          event_type,
+          content,
+          author_type
+        )
+        VALUES (
+          ?,
+          ?,
+          'status_changed',
+          ?,
+          'system'
+        )
+      `).bind(
+        current.object_id || null,
+        current.id,
+        eventContent
+      ),
+    ]);
+  } catch (err) {
+    console.error(
+      "Telegram status update failed:",
+      err
+    );
+
+    await answerCallbackQuery(
+      env,
+      callbackId,
+      "❌ Помилка збереження",
+      true
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  await notifyRequestClient(
+    env,
+    current.id,
+    [`Заявка № ${current.request_code}`, `Статус: ${newLabel}`].join("\n")
+  );
+
+  const req = await env.DB.prepare(`
+    SELECT *
+    FROM requests
+    WHERE id = ?
+    LIMIT 1
+  `).bind(current.id).first();
+
+  const text = [
+    `🏠 ЗАЯВКА ${req.request_code}`,
+    "",
+    `👤 ${req.name || "—"}`,
+    `📞 ${req.phone || "—"}`,
+    `🔧 ${req.type_label || req.type || "—"}`,
+    `📍 ${req.location || "—"}`,
+    `📊 Статус: ${newLabel}`,
+    `🕐 Оновлено: ${new Date().toLocaleString(
+      "uk-UA",
+      { timeZone: "Europe/Kyiv" }
+    )}`,
+  ].join("\n");
+
+  const buttons = buildStatusButtons(
+    req.request_code,
+    newStatus,
+    calculatorUrl(
+      req.request_code,
+      req.estimate_token,
+      workerOrigin,
+      env
+    )
+  );
+
+  if (!req.transferred_to_jobs) {
+    buttons.push([{
+      text: "🤝 Передати в канал",
+      callback_data:
+        `transfer_to_jobs:${req.request_code}`,
+    }]);
+  }
+
+  buttons.push([{
+    text: "ℹ️ Деталі",
+    callback_data:
+      `details:${req.request_code}`,
+  }]);
+
+  buttons.push([
+    {
+      text: "📋 До заявок",
+      callback_data: "requests_list",
+    },
+  ]);
+
+  await editMessageText(
+    env,
+    chatId,
+    messageId,
+    text,
+    buttons
+  );
+
+  await answerCallbackQuery(
+    env,
+    callbackId,
+    `✅ ${newLabel}`
+  );
+
+  return json(
+    { ok: true },
+    headers
+  );
+}
+
+/* =========================================================
+ * TELEGRAM: передача заявки в Jobs
+ * ========================================================= */
+
+async function handleTransferToJobs(
+  env,
+  headers,
+  requestCode,
+  cq,
+  chatId,
+  messageId,
+  workerOrigin
+) {
+  const req = await env.DB.prepare(`
+    SELECT *
+    FROM requests
+    WHERE request_code = ?
+    LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!req) {
+    await answerCallbackQuery(
+      env,
+      cq.id,
+      "❌ Заявку не знайдено",
+      true
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  if (req.transferred_to_jobs) {
+    await answerCallbackQuery(
+      env,
+      cq.id,
+      "⚠️ Уже передано в канал",
+      true
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  const result =
+    await publishRequestToJobsGroup(
+      env,
+      req
+    );
+
+  if (!result.ok) {
+    console.error(
+      "Publish to jobs group failed:",
+      result.description || result
+    );
+
+    await answerCallbackQuery(
+      env,
+      cq.id,
+      "❌ Не вдалося опублікувати",
+      true
+    );
+
+    return json(
+      { ok: true },
+      headers
+    );
+  }
+
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE requests
+        SET
+          transferred_to_jobs = 1,
+          transferred_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(req.id),
+
+      env.DB.prepare(`
+        INSERT INTO events (
+          object_id,
+          request_id,
+          event_type,
+          content,
+          author_type
+        )
+        VALUES (
+          ?,
+          ?,
+          'transferred_to_jobs',
+          'Передано в канал майстрів',
+          'system'
+        )
+      `).bind(
+        req.object_id || null,
+        req.id
+      ),
+    ]);
+  } catch (err) {
+    console.error(
+      "Mark as transferred failed:",
+      err
+    );
+  }
+
+  await notifyRequestClient(
+    env,
+    req.id,
+    [
+      "Шукаємо майстра 🔎",
+      "Ми передали вашу заявку перевіреним майстрам.",
+      "Повідомимо, щойно знайдеться виконавець.",
+    ].join("\n")
+  );
+
+  const updatedText = [
+    `🏠 ЗАЯВКА ${req.request_code}`,
+    "",
+    `👤 ${req.name || "—"}`,
+    `📞 ${req.phone || "—"}`,
+    `🔧 ${req.type_label || req.type || "—"}`,
+    `📍 ${req.location || "—"}`,
+    `📊 Статус: ${statusLabel(req.status)}`,
+    "🤝 Передано в канал майстрів",
+    `🕐 ${new Date().toLocaleString(
+      "uk-UA",
+      { timeZone: "Europe/Kyiv" }
+    )}`,
+  ].join("\n");
+
+  const buttons = buildStatusButtons(
+    req.request_code,
+    req.status,
+    calculatorUrl(
+      req.request_code,
+      req.estimate_token,
+      workerOrigin,
+      env
+    )
+  );
+
+  buttons.push([{
+    text: "ℹ️ Деталі",
+    callback_data:
+      `details:${req.request_code}`,
+  }]);
+
+  buttons.push([
+    {
+      text: "📋 До заявок",
+      callback_data: "requests_list",
+    },
+  ]);
+
+  await editMessageText(
+    env,
+    chatId,
+    messageId,
+    updatedText,
+    buttons
+  );
+
+  await answerCallbackQuery(
+    env,
+    cq.id,
+    "✅ Передано в канал майстрів"
+  );
+
+  return json(
+    { ok: true },
+    headers
+  );
+}
+
+
+/* =========================================================
+ * ADMIN: перевірка заявки після відмови клієнта
+ * ========================================================= */
+
+async function handleJobsReviewReturn(env, headers, requestCode, callbackId, chatId, messageId) {
+  const req = await env.DB.prepare(`
+    SELECT * FROM requests WHERE request_code = ? LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!req) {
+    await safeAnswerCallback(env, callbackId, "❌ Заявку не знайдено", true);
+    return json({ ok: true }, headers);
+  }
+
+  if (req.assigned_master_id) {
+    await safeAnswerCallback(env, callbackId, "❌ Заявка вже закріплена за майстром", true);
+    return json({ ok: true }, headers);
+  }
+
+  if (["installation", "completed", "cancelled"].includes(req.status)) {
+    await safeAnswerCallback(env, callbackId, "❌ Заявку вже закрито або роботи розпочато", true);
+    return json({ ok: true }, headers);
+  }
+
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE requests
+        SET transferred_to_jobs = 1,
+            transferred_at = COALESCE(transferred_at, CURRENT_TIMESTAMP),
+            assigned_master_id = NULL,
+            assigned_master_name = NULL,
+            assigned_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(req.id),
+      env.DB.prepare(`
+        INSERT INTO events (object_id, request_id, event_type, content, author_type)
+        VALUES (?, ?, 'admin_returned_to_jobs', 'Адміністратор повернув заявку майстрам', 'admin')
+      `).bind(req.object_id || null, req.id),
+    ]);
+  } catch (err) {
+    console.error("Admin return to Jobs failed:", err);
+    await safeAnswerCallback(env, callbackId, "❌ Помилка збереження", true);
+    return json({ ok: true }, headers);
+  }
+
+  await editMessageText(env, chatId, messageId, [
+    "↩️ ЗАЯВКУ ПОВЕРНУТО МАЙСТРАМ", "",
+    `🆔 ${req.request_code}`, `👤 ${req.name || "—"}`, `📞 ${req.phone || "—"}`, "",
+    "Заявка знову доступна активним майстрам у SA-MASTER Jobs."
+  ].join("\
+"), [[
+    { text: "🏠 До заявки", callback_data: `request_open:${req.request_code}` },
+    { text: "❌ Закрити", callback_data: "admin_close" },
+  ]]);
+
+  await safeAnswerCallback(env, callbackId, "✅ Повернуто в Jobs");
+  return json({ ok: true }, headers);
+}
+
+async function handleJobsReviewClose(env, headers, requestCode, callbackId, chatId, messageId) {
+  const req = await env.DB.prepare(`
+    SELECT * FROM requests WHERE request_code = ? LIMIT 1
+  `).bind(requestCode).first();
+
+  if (!req) {
+    await safeAnswerCallback(env, callbackId, "❌ Заявку не знайдено", true);
+    return json({ ok: true }, headers);
+  }
+
+  if (req.status === "completed") {
+    await safeAnswerCallback(env, callbackId, "❌ Завершену заявку не можна скасувати", true);
+    return json({ ok: true }, headers);
+  }
+
+  try {
+    await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE requests
+        SET status = 'cancelled', transferred_to_jobs = 0,
+            assigned_master_id = NULL, assigned_master_name = NULL, assigned_at = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).bind(req.id),
+      env.DB.prepare(`
+        INSERT INTO events (object_id, request_id, event_type, content, author_type)
+        VALUES (?, ?, 'admin_closed_jobs_review', 'Адміністратор закрив заявку після перевірки', 'admin')
+      `).bind(req.object_id || null, req.id),
+    ]);
+  } catch (err) {
+    console.error("Admin close Jobs review failed:", err);
+    await safeAnswerCallback(env, callbackId, "❌ Помилка збереження", true);
+    return json({ ok: true }, headers);
+  }
+
+  await editMessageText(env, chatId, messageId, [
+    "❌ ЗАЯВКУ ЗАКРИТО", "", `🆔 ${req.request_code}`, `👤 ${req.name || "—"}`, "",
+    "Статус: Скасовано.", "Заявка більше не доступна майстрам."
+  ].join("\
+"), [[
+    { text: "🏠 До заявки", callback_data: `request_open:${req.request_code}` },
+    { text: "❌ Закрити", callback_data: "admin_close" },
+  ]]);
+
+  await safeAnswerCallback(env, callbackId, "❌ Заявку закрито");
+  return json({ ok: true }, headers);
 }
