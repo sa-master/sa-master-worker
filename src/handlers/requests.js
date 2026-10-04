@@ -623,6 +623,20 @@ async function deleteRequestPermanently(
   try {
     await ensureTelegramTrackingTables(env);
 
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS job_private_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id INTEGER NOT NULL,
+        request_code TEXT,
+        master_id INTEGER,
+        chat_id TEXT NOT NULL,
+        message_id INTEGER NOT NULL,
+        message_kind TEXT NOT NULL DEFAULT 'private',
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(chat_id, message_id)
+      )
+    `).run();
+
     await env.DB.batch([
       env.DB.prepare(`
         DELETE FROM request_telegram_bindings
@@ -651,6 +665,11 @@ async function deleteRequestPermanently(
 
       env.DB.prepare(`
         DELETE FROM job_messages
+        WHERE request_id = ?
+      `).bind(req.id),
+
+      env.DB.prepare(`
+        DELETE FROM job_private_messages
         WHERE request_id = ?
       `).bind(req.id),
 
