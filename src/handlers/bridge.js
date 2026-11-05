@@ -1,4 +1,5 @@
 import { publishRequestToJobs as publishToOldJobs } from "./jobs.js";
+import { sendTelegram } from "../lib/telegram.js";
 
 /*
  * Міст у новий SA-MASTER Jobs.
@@ -78,17 +79,23 @@ export async function publishRequestToJobs(env, request) {
       signal: controller.signal,
     });
 
-    const data = await res.json().catch(() => ({}));
+    const raw = await res.text().catch(() => "");
+    let data = {};
+    try { data = JSON.parse(raw); } catch { data = {}; }
 
     if (!res.ok || !data.ok) {
       await rollback();
-      return { ok: false, description: data.error || `Новий Jobs: HTTP ${res.status}` };
+      const why = data.error || `HTTP ${res.status} ${String(raw).slice(0, 120)}`.trim();
+      await sendTelegram(env, `⚠️ Міст у новий Jobs не спрацював (${req.request_code}): ${why}`);
+      return { ok: false, description: why };
     }
 
     return { ok: true, request_code: req.request_code, new_request_id: data.request_id };
   } catch (err) {
     await rollback();
-    return { ok: false, description: String(err?.message || err) };
+    const why = String(err?.message || err);
+    await sendTelegram(env, `⚠️ Міст у новий Jobs не спрацював (${req.request_code}): ${why}`);
+    return { ok: false, description: why };
   } finally {
     clearTimeout(timer);
   }
