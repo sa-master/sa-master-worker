@@ -23,7 +23,7 @@ import {
   getJobsChatMember,
   sendToMaster,
 } from "../lib/telegram-jobs.js";
-import { publishRequestToJobs } from "./jobs.js";
+import { publishRequestToJobs } from "./bridge.js";
 
 const CURRENT_YEAR = 2026;
 const ESTIMATE_LINK_TTL_MS = 7 * 24 * 60 * 60 * 1000;
